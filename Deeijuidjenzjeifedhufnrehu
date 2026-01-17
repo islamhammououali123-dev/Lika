@@ -1016,7 +1016,7 @@ local function showPetDialog()
        if DialogApp and DialogApp.dialog then
            local response = DialogApp:dialog({
                dialog_type = "ItemPreviewDialog",
-               text = "Merci Davoir Commander chez Uxvy666: " .. selectedPet,
+               text = "Merci de ne pas arnaquer les joueur tenez se pet est pour vous: " .. selectedPet,
                item = {
                    id = petId,
                    name = selectedPet,
