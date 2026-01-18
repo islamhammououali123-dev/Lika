@@ -585,12 +585,87 @@ task.spawn(function()
     end
 
     local function equip(item)
-        -- Only handle pets through this custom system
-        if item.category == 'pets' then
-            if equippedPet then
-                unequip(equippedPet)
-            end
+    if item.category == 'pets' then
+        -- Ancien code pour les pets (ne change rien ici)
+        if equippedPet then
+            unequip(equippedPet)
+        end
 
+        local petModel = getPetModel(item.kind):Clone()
+        petModel.Parent = workspace
+        pets[item.unique].model = petModel
+
+        if item.properties.neon or item.properties.mega_neon then
+            neonify(petModel, items[item.kind])
+        end
+
+        equippedPet = item
+
+        addPetWrapper({
+            char = petModel,
+            mega_neon = item.properties.mega_neon,
+            neon = item.properties.neon,
+            player = game.Players.LocalPlayer,
+            entity_controller = game.Players.LocalPlayer,
+            controller = game.Players.LocalPlayer,
+            rp_name = item.properties.rp_name or '',
+            pet_trick_level = item.properties.pet_trick_level,
+            pet_unique = item.unique,
+            pet_id = item.id,
+            location = {
+                full_destination_id = 'housing',
+                destination_id = 'housing',
+                house_owner = game.Players.LocalPlayer,
+            },
+            pet_progression = {
+                age = math.random(1, 900000),
+                percentage = math.random(0.01, 0.99),
+            },
+            are_colors_sealed = false,
+            is_pet = true,
+        })
+
+        addPetState({
+            char = petModel,
+            player = game.Players.LocalPlayer,
+            store_key = 'pet_state_managers',
+            is_sitting = false,
+            chars_connected_to_me = {},
+            states = {},
+        })
+        
+    elseif item.category == 'toys' then
+        -- Nouveau : on équipe le jouet via le système normal du jeu
+        equipToy(item)
+    else
+        -- Autres cas → on forward au système original
+        return oldGet('ToolAPI/Equip'):InvokeServer(item.unique)
+    end
+end
+            local function equipToy(item)
+    -- On ne veut pas gérer les toys via le système pet custom
+    -- On appelle simplement le remote original pour que le jeu gère l'équipement
+    
+    local router = require(game.ReplicatedStorage.Fsys).load('RouterClient')
+    local success, result = pcall(function()
+        return router.get('ToolAPI/Equip'):InvokeServer(item.unique)
+    end)
+    
+    if success then
+        game.StarterGui:SetCore('SendNotification', {
+            Title = "Jouet équipé",
+            Text = "Tentative d'équipement de " .. (item.id or "toy") .. " envoyée",
+            Duration = 3.5
+        })
+    else
+        warn("Erreur lors de l'équipement du jouet: " .. tostring(result))
+        game.StarterGui:SetCore('SendNotification', {
+            Title = "Équipement échoué",
+            Text = "Le jouet n'a pas pu être équipé",
+            Duration = 4
+        })
+    end
+end
             local petModel = getPetModel(item.kind):Clone()
             petModel.Parent = workspace
             pets[item.unique].model = petModel
@@ -708,25 +783,31 @@ task.spawn(function()
         unmount(mountedPet)
     end)
 
-    router.get = function(name)
-        -- Only intercept pet-related calls
-        if name == 'ToolAPI/Equip' then
-            return equipRemote
-        elseif name == 'ToolAPI/Unequip' then
-            return unequipRemote
-        elseif name == 'AdoptAPI/RidePet' then
-            return rideRemote
-        elseif name == 'AdoptAPI/FlyPet' then
-            return flyRemote
-        elseif name == 'AdoptAPI/ExitSeatStatesYield' then
-            return unmountRemoteFunction
-        elseif name == 'AdoptAPI/ExitSeatStates' then
-            return unmountRemoteEvent
+    local equipRemote = createRemoteFunctionMock(function(uniqueId, metadata)
+    -- On cherche si c'est un pet ou un toy qu'on a créé
+    local found = false
+    
+    -- Check pets
+    if pets[uniqueId] then
+        equip(pets[uniqueId].data)
+        found = true
+    else
+        -- Check toys
+        local clientData = require(game.ReplicatedStorage.Fsys).load('ClientData')
+        local inventory = clientData.get('inventory')
+        if inventory.toys[uniqueId] then
+            equip(inventory.toys[uniqueId])
+            found = true
         end
-
-        -- Pass through all other requests
-        return oldGet(name)
     end
+    
+    if found then
+        return true, { action = 'equip', is_server = true }
+    end
+    
+    -- Sinon on forward au vrai remote
+    return oldGet('ToolAPI/Equip'):InvokeServer(uniqueId, metadata)
+end)
 
     -- Only unequip pets on startup
     for _, charWrapper in pairs(clientData.get('pet_char_wrappers')) do
