@@ -1,0 +1,1576 @@
+
+
+local Players = game:GetService('Players')
+local ReplicatedStorage = game:GetService('ReplicatedStorage')
+local RunService = game:GetService('RunService')
+local UserInputService = game:GetService('UserInputService')
+local TweenService = game:GetService('TweenService')
+local HttpService = game:GetService('HttpService')
+
+local LocalPlayer = Players.LocalPlayer
+
+-- Thread identity helper
+local function set_thread_identity(level)
+    if type(syn) == "table" and syn.set_thread_identity then
+        return syn.set_thread_identity(level)
+    elseif type(setthreadidentity) == "function" then
+        local current = getthreadidentity and getthreadidentity() or 2
+        setthreadidentity(level)
+        return current
+    elseif type(setthreadcontext) == "function" then
+        local current = getthreadcontext and getthreadcontext() or 2
+        setthreadcontext(level)
+        return current
+    end
+    return 2
+end
+
+pcall(function()
+    set_thread_identity(2)
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- GLOBAL STORAGE
+-- ═══════════════════════════════════════════════════════════════
+local fakePlayerIds = {}
+_G.fakePlayerIds = fakePlayerIds
+_G.fakeFriendsData = {}
+
+-- ═══════════════════════════════════════════════════════════════
+-- LOAD FSYS AND MODULES
+-- ═══════════════════════════════════════════════════════════════
+local Fsys = require(ReplicatedStorage:WaitForChild('Fsys'))
+local load = Fsys.load
+
+-- Wait for modules to load
+task.wait(0.5)
+
+local UIManager, ClientData, TableUtil, RouterClient, InventoryDB
+local animationManager, ColorThemeManager, downloader
+
+local success, err = pcall(function()
+    UIManager = load('UIManager')
+    ClientData = load('ClientData')
+    TableUtil = load('TableUtil')
+    RouterClient = load('RouterClient')
+    InventoryDB = load('InventoryDB')
+    animationManager = load('AnimationManager')
+    ColorThemeManager = load('ColorThemeManager')
+    downloader = load('DownloadClient')
+end)
+
+if not success then
+    warn("Failed to load modules:", err)
+    return
+end
+
+if UIManager.wait_for_initialization then
+    UIManager:wait_for_initialization()
+else
+    task.wait(2)
+end
+
+-- Get Apps
+local TradeApp = UIManager.apps.TradeApp
+local BackpackApp = UIManager.apps.BackpackApp
+local DialogApp = UIManager.apps.DialogApp
+local HintApp = UIManager.apps.HintApp
+local TradeHistoryApp = UIManager.apps.TradeHistoryApp
+local PlayerProfileApp = UIManager.apps.PlayerProfileApp
+local FriendsApp = UIManager.apps.FriendsApp
+
+-- ═══════════════════════════════════════════════════════════════
+-- CONFIGURATION
+-- ═══════════════════════════════════════════════════════════════
+local CONFIG = {
+    PARTNER_NAME = 'TradePartner',
+    PARTNER_USER_ID = 1,
+    AUTO_ACCEPT_DELAY = 1,
+    AUTO_CONFIRM_DELAY = 1,
+    SPECTATOR_COUNT = 3,
+    AUTO_PARTNER = true,
+    NEGOTIATION_LOCK = 5,
+    CONFIRMATION_LOCK_PER_ITEM = 3,
+    TRADE_REQUEST_DELAY = 1,
+    ADD_PET_REQUEST_DELAY = 0.5,
+    CHAT_MESSAGES = {
+        'salut!', 'cc', 'omg merci!', 'tu gères!', 'wow', 'nice trade'
+    },
+    VERIFIED_FRIENDS = {},
+    SHOW_VERIFIED_FRIEND = true,
+}
+
+-- ═══════════════════════════════════════════════════════════════
+-- PET DATA
+-- ═══════════════════════════════════════════════════════════════
+local highValuePets = {
+    'Shadow Dragon', 'Bat Dragon', 'Frost Dragon', 'Giraffe', 'Owl',
+    'Parrot', 'Crow', 'Evil Unicorn', 'Arctic Reindeer', 'Hedgehog',
+    'Dalmatian', 'Turtle', 'Kangaroo', 'Flamingo', 'Balloon Unicorn',
+    'Diamond Butterfly', 'Orchid Butterfly', 'Giant Panda', 'Cow'
+}
+
+local validPetNames = {}
+local validPetNamesClean = {}
+
+local function loadPetNames()
+    if InventoryDB and InventoryDB.pets then
+        for id, item in pairs(InventoryDB.pets) do
+            table.insert(validPetNames, item.name)
+            table.insert(validPetNamesClean, item.name:lower():gsub('%s+', ''))
+        end
+    end
+end
+loadPetNames()
+
+-- ═══════════════════════════════════════════════════════════════
+-- MOCK TRADE STATE
+-- ═══════════════════════════════════════════════════════════════
+local mockState = {
+    active = false,
+    trade = nil,
+    isAddingItem = false,
+    partnerActionPending = false,
+    originalFunctions = {},
+    tradeCompleting = false,
+    scamWarningShown = true,
+    originalDialogFunction = nil,
+    blockedTradeRequests = {},
+    tradeHistory = {},
+    addedTradeIds = {},
+    pendingTradeRequest = false,
+    canShowTradeRequest = true,
+    tradeRequestBlocked = false,
+}
+
+-- ═══════════════════════════════════════════════════════════════
+-- SPAWNER STATE
+-- ═══════════════════════════════════════════════════════════════
+local spawnerState = {
+    pets = {},
+    equippedPet = nil,
+    mountedPet = nil,
+    currentMountTrack = nil,
+    petModels = {},
+}
+
+local activeFlags = { F = false, R = false, N = false, M = false }
+
+-- ═══════════════════════════════════════════════════════════════
+-- UTILITY FUNCTIONS
+-- ═══════════════════════════════════════════════════════════════
+local function getUniqueId()
+    return HttpService:GenerateGUID(false)
+end
+
+local function updateData(key, action)
+    local oldId = set_thread_identity(2)
+    local data = ClientData.get(key)
+    local clonedData = table.clone(data)
+    ClientData.predict(key, action(clonedData))
+    set_thread_identity(oldId)
+end
+
+local function findIndex(array, finder)
+    for index, value in pairs(array) do
+        if finder(value, index) then
+            return index
+        end
+    end
+    return nil
+end
+
+local function getPetModel(kind)
+    if spawnerState.petModels[kind] then
+        return spawnerState.petModels[kind]:Clone()
+    end
+    
+    local success, streamed = pcall(function()
+        local promise = downloader.promise_download_copy('Pets', kind)
+        if promise then
+            return promise:expect()
+        end
+        return nil
+    end)
+    
+    if success and streamed then
+        spawnerState.petModels[kind] = streamed
+        return streamed:Clone()
+    end
+    return nil
+end
+
+local function GetPetByName(name)
+    if not InventoryDB or not InventoryDB.pets then return false end
+    for id, v in pairs(InventoryDB.pets) do
+        if v.name:lower() == name:lower() then
+            return v.id, id
+        end
+    end
+    return false
+end
+
+local function GetToyByName(name)
+    if not InventoryDB or not InventoryDB.toys then return false end
+    for id, v in pairs(InventoryDB.toys) do
+        if v.name:lower() == name:lower() then
+            return v.id, id
+        end
+    end
+    return false
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- NEON EFFECTS
+-- ═══════════════════════════════════════════════════════════════
+local function applyNeonEffects(petModel, kind)
+    local success = pcall(function()
+        local petRigs = load('new:PetRigs')
+        local petModelInstance = petModel:FindFirstChild('PetModel') or petModel
+        local petData = InventoryDB.pets[kind]
+        
+        if not petData or not petData.neon_parts then return end
+        
+        for neonPart, configuration in pairs(petData.neon_parts) do
+            local trueNeonPart = petRigs.get(petModelInstance).get_geo_part(petModelInstance, neonPart)
+            if trueNeonPart then
+                trueNeonPart.Material = Enum.Material.Neon
+                if configuration.Color then
+                    trueNeonPart.Color = configuration.Color
+                end
+            end
+        end
+    end)
+end
+
+local function applyMegaNeonEffects(petModel, kind)
+    local success = pcall(function()
+        local petRigs = load('new:PetRigs')
+        local petModelInstance = petModel:FindFirstChild('PetModel') or petModel
+        local petData = InventoryDB.pets[kind]
+        
+        if not petData or not petData.neon_parts then return end
+        
+        for neonPart, configuration in pairs(petData.neon_parts) do
+            local trueNeonPart = petRigs.get(petModelInstance).get_geo_part(petModelInstance, neonPart)
+            if trueNeonPart then
+                trueNeonPart.Material = Enum.Material.Neon
+                if configuration.Color then
+                    local h, s, v = configuration.Color:ToHSV()
+                    trueNeonPart.Color = Color3.fromHSV(h, math.min(s * 1.3, 1), math.min(v * 1.4, 1))
+                else
+                    trueNeonPart.Color = Color3.fromRGB(170, 0, 255)
+                end
+            end
+        end
+    end)
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- MOCK PARTNER CREATION
+-- ═══════════════════════════════════════════════════════════════
+local function createMockPartner(player)
+    return setmetatable({
+        Name = player and player.Name or CONFIG.PARTNER_NAME,
+        DisplayName = player and player.DisplayName or CONFIG.PARTNER_NAME,
+        UserId = player and player.UserId or CONFIG.PARTNER_USER_ID,
+    }, {
+        __index = function(t, k)
+            if k == 'Parent' then return Players end
+            if k == 'IsA' then
+                return function(self, className)
+                    return className == 'Player'
+                end
+            end
+            return rawget(t, k)
+        end,
+        __tostring = function()
+            return player and player.Name or CONFIG.PARTNER_NAME
+        end,
+    })
+end
+
+local mockPartner = createMockPartner()
+
+-- ═══════════════════════════════════════════════════════════════
+-- MOCK TRADE FUNCTIONS
+-- ═══════════════════════════════════════════════════════════════
+local function createMockTrade(realPlayer)
+    local partner = realPlayer and createMockPartner(realPlayer) or mockPartner
+    
+    return {
+        trade_id = 'MOCK_' .. tick(),
+        sender = Players.LocalPlayer,
+        recipient = partner,
+        sender_offer = {
+            items = {},
+            player_name = Players.LocalPlayer.Name,
+            negotiated = false,
+            confirmed = false,
+        },
+        recipient_offer = {
+            items = {},
+            player_name = CONFIG.PARTNER_NAME,
+            negotiated = false,
+            confirmed = false,
+        },
+        current_stage = 'negotiation',
+        offer_version = 1,
+        sender_has_trade_license = true,
+        recipient_has_trade_license = true,
+        busy_indicators = {},
+        subscriber_count = CONFIG.SPECTATOR_COUNT,
+    }
+end
+
+local function createTradeHistoryRecord(trade)
+    return {
+        trade_id = trade.trade_id,
+        timestamp = os.time(),
+        sender_user_id = Players.LocalPlayer.UserId,
+        sender_name = Players.LocalPlayer.Name,
+        sender_items = TableUtil.deep_copy(trade.sender_offer.items),
+        recipient_user_id = trade.recipient.UserId,
+        recipient_name = CONFIG.PARTNER_NAME,
+        recipient_items = TableUtil.deep_copy(trade.recipient_offer.items),
+        reported = false,
+        reverted = nil,
+    }
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- STORE ORIGINAL FUNCTIONS
+-- ═══════════════════════════════════════════════════════════════
+local function storeOriginalFunctions()
+    if not TradeApp then return end
+    
+    local funcs = {
+        '_get_local_trade_state', '_overwrite_local_trade_state',
+        '_change_local_trade_state', '_get_my_offer', '_get_partner_offer',
+        '_get_my_player', '_get_partner', '_get_current_trade_stage',
+        '_on_accept_pressed', '_on_confirm_pressed', '_on_unaccept_pressed',
+        '_decline_trade', '_add_item_to_my_offer', '_remove_item_from_my_offer',
+        '_lock_trade_for_appropriate_time', '_get_lock_time', 'refresh_all',
+        '_evaluate_trade_fairness'
+    }
+    
+    for _, funcName in ipairs(funcs) do
+        if TradeApp[funcName] then
+            mockState.originalFunctions[funcName] = TradeApp[funcName]
+        end
+    end
+    
+    if TradeHistoryApp then
+        if TradeHistoryApp._get_trade_history then
+            mockState.originalGetTradeHistory = TradeHistoryApp._get_trade_history
+        end
+        if TradeHistoryApp.report_scam then
+            mockState.originalReportScam = TradeHistoryApp.report_scam
+        end
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- FRIEND HIGHLIGHT
+-- ═══════════════════════════════════════════════════════════════
+local function FriendHighlight(FriendValue)
+    pcall(function()
+        local NegotiationFrame = Players.LocalPlayer.PlayerGui.TradeApp.Frame.NegotiationFrame
+        NegotiationFrame.FriendHighlight.Visible = FriendValue
+        NegotiationFrame.FriendBorder.Visible = FriendValue
+        local PartnerFrame = NegotiationFrame.Header.PartnerFrame
+        PartnerFrame.NameLabel.FriendLabel.Visible = FriendValue
+        local themeColor = ColorThemeManager.lookup(FriendValue and 'background' or 'saturated')
+        PartnerFrame.ProfileIcon.ImageColor3 = themeColor
+        PartnerFrame.NameLabel.TextColor3 = themeColor
+        PartnerFrame.Icon.Visible = FriendValue
+        PartnerFrame.Icon.Image = 'rbxassetid://84667805159408'
+    end)
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- UPDATE BUSY INDICATORS
+-- ═══════════════════════════════════════════════════════════════
+local function update_busy_indicators(args1)
+    if not mockState.trade or not TradeApp then return end
+    pcall(function()
+        local v144 = mockState.trade.busy_indicators
+        local v145 = TradeApp._get_partner().UserId
+        v144[tostring(v145)] = args1
+        TradeApp.partner_negotiation_offer_pane:display_busy(v144[tostring(v145)])
+    end)
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- ADD PET TO PARTNER OFFER
+-- ═══════════════════════════════════════════════════════════════
+local function addPetToPartnerOffer(petName, flags)
+    if not mockState.active or not mockState.trade then
+        return false, 'No active mock trade'
+    end
+    
+    if mockState.trade.current_stage == 'confirmation' then
+        return false, 'Cannot modify during confirmation'
+    end
+    
+    if #mockState.trade.recipient_offer.items >= 18 then
+        return false, 'Partner offer full'
+    end
+    
+    update_busy_indicators({ picking = true })
+    task.wait(CONFIG.ADD_PET_REQUEST_DELAY)
+    
+    if not InventoryDB or not InventoryDB.pets then
+        return false, 'InventoryDB not loaded'
+    end
+    
+    for id, item in pairs(InventoryDB.pets) do
+        if item.name == petName then
+            local fake_uuid = getUniqueId()
+            local petItem = {
+                category = 'pets',
+                kind = id,
+                unique = fake_uuid,
+                properties = {
+                    flyable = flags.F,
+                    rideable = flags.R,
+                    neon = flags.N,
+                    mega_neon = flags.M,
+                    age = 1,
+                },
+            }
+            
+            table.insert(mockState.trade.recipient_offer.items, petItem)
+            mockState.trade.sender_offer.negotiated = false
+            mockState.trade.recipient_offer.negotiated = false
+            
+            if mockState.trade.current_stage == 'confirmation' then
+                mockState.trade.current_stage = 'negotiation'
+                mockState.trade.sender_offer.confirmed = false
+                mockState.trade.recipient_offer.confirmed = false
+            end
+            
+            mockState.trade.offer_version = mockState.trade.offer_version + 1
+            TradeApp:_overwrite_local_trade_state(mockState.trade)
+            
+            if TradeApp._lock_trade_for_appropriate_time then
+                TradeApp:_lock_trade_for_appropriate_time()
+            end
+            
+            if TradeApp._render_message_in_trade_chat then
+                TradeApp:_render_message_in_trade_chat(
+                    nil,
+                    string.format('%s added %s.', CONFIG.PARTNER_NAME, petName),
+                    true
+                )
+            end
+            
+            update_busy_indicators({ picking = false })
+            return true, 'Pet added successfully'
+        end
+    end
+    
+    update_busy_indicators({ picking = false })
+    return false, 'Pet not found'
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- REMOVE PET FROM PARTNER OFFER
+-- ═══════════════════════════════════════════════════════════════
+local function removeLatestPetFromPartnerOffer()
+    if not mockState.active or not mockState.trade then
+        return false, 'No active mock trade'
+    end
+    
+    if mockState.trade.current_stage == 'confirmation' then
+        return false, 'Cannot modify during confirmation'
+    end
+    
+    local partnerItems = mockState.trade.recipient_offer.items
+    if #partnerItems == 0 then
+        return false, 'No items to remove'
+    end
+    
+    local removedItem = table.remove(partnerItems)
+    
+    mockState.trade.sender_offer.negotiated = false
+    mockState.trade.recipient_offer.negotiated = false
+    mockState.trade.offer_version = mockState.trade.offer_version + 1
+    
+    TradeApp:_overwrite_local_trade_state(mockState.trade)
+    
+    if TradeApp._lock_trade_for_appropriate_time then
+        TradeApp:_lock_trade_for_appropriate_time()
+    end
+    
+    return true, 'Pet removed successfully'
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- PARTNER AUTO ACTION
+-- ═══════════════════════════════════════════════════════════════
+local function partnerAutoAction()
+    if not mockState.active or not mockState.trade or mockState.partnerActionPending then
+        return
+    end
+    
+    mockState.partnerActionPending = true
+    
+    -- Wait for lock countdown
+    while TradeApp.lock_countdown and TradeApp.lock_countdown.is_going and TradeApp.lock_countdown:is_going() do
+        task.wait(0.1)
+    end
+    
+    if mockState.trade.current_stage == 'negotiation' then
+        task.wait(CONFIG.AUTO_ACCEPT_DELAY)
+        
+        if mockState.active and mockState.trade then
+            mockState.trade.recipient_offer.negotiated = true
+            
+            if mockState.trade.sender_offer.negotiated then
+                mockState.trade.current_stage = 'confirmation'
+                mockState.trade.offer_version = mockState.trade.offer_version + 1
+                TradeApp:_overwrite_local_trade_state(mockState.trade)
+                
+                if TradeApp._evaluate_trade_fairness then
+                    TradeApp:_evaluate_trade_fairness()
+                end
+                
+                if TradeApp._lock_trade_for_appropriate_time then
+                    TradeApp:_lock_trade_for_appropriate_time()
+                end
+            else
+                mockState.trade.offer_version = mockState.trade.offer_version + 1
+                TradeApp:_overwrite_local_trade_state(mockState.trade)
+            end
+        end
+    elseif mockState.trade.current_stage == 'confirmation' then
+        task.wait(CONFIG.AUTO_CONFIRM_DELAY)
+        
+        if mockState.active and mockState.trade then
+            mockState.trade.recipient_offer.confirmed = true
+            mockState.trade.offer_version = mockState.trade.offer_version + 1
+            TradeApp:_overwrite_local_trade_state(mockState.trade)
+            
+            if mockState.trade.sender_offer.confirmed and not mockState.tradeCompleting then
+                mockState.tradeCompleting = true
+                
+                if TradeApp._set_confirmation_arrow_rotating then
+                    TradeApp:_set_confirmation_arrow_rotating(true)
+                end
+                
+                task.wait(3)
+                
+                local historyRecord = createTradeHistoryRecord(mockState.trade)
+                if not mockState.addedTradeIds[historyRecord.trade_id] then
+                    mockState.addedTradeIds[historyRecord.trade_id] = true
+                    table.insert(mockState.tradeHistory, historyRecord)
+                end
+                
+                mockState.active = false
+                mockState.trade = nil
+                mockState.tradeCompleting = false
+                mockState.scamWarningShown = true
+                mockState.canShowTradeRequest = true
+                mockState.tradeRequestBlocked = false
+                
+                UIManager.set_app_visibility('TradeApp', false)
+                
+                if HintApp then
+                    HintApp:hint({
+                        text = 'The trade was successful!',
+                        length = 5,
+                        overridable = true,
+                    })
+                end
+            end
+        end
+    end
+    
+    mockState.partnerActionPending = false
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- HOOK TRADE FUNCTIONS
+-- ═══════════════════════════════════════════════════════════════
+local function hookTradeFunctions()
+    if not TradeApp then return end
+    
+    storeOriginalFunctions()
+    
+    TradeApp._get_local_trade_state = function(self)
+        if mockState.active and mockState.trade then
+            return TableUtil.deep_copy(mockState.trade)
+        end
+        return mockState.originalFunctions._get_local_trade_state(self)
+    end
+    
+    TradeApp._overwrite_local_trade_state = function(self, newState)
+        if mockState.active then
+            if newState then
+                mockState.trade = newState
+                self.local_trade_state = newState
+                
+                if mockState.trade then
+                    mockState.trade.subscriber_count = CONFIG.SPECTATOR_COUNT
+                end
+                
+                if self._on_local_trade_state_changed then
+                    pcall(function()
+                        self:_on_local_trade_state_changed(newState, newState)
+                    end)
+                end
+                
+                if self.refresh_all then
+                    pcall(function()
+                        self:refresh_all()
+                        FriendHighlight(true)
+                    end)
+                end
+            else
+                mockState.trade = nil
+                mockState.active = false
+                mockState.scamWarningShown = false
+                mockState.canShowTradeRequest = true
+                mockState.tradeRequestBlocked = false
+                self.local_trade_state = nil
+            end
+        else
+            return mockState.originalFunctions._overwrite_local_trade_state(self, newState)
+        end
+    end
+    
+    TradeApp._get_my_offer = function(self)
+        local state = self:_get_local_trade_state()
+        if mockState.active and state then
+            if Players.LocalPlayer == state.sender then
+                return state.sender_offer, 'sender_offer'
+            else
+                return state.recipient_offer, 'recipient_offer'
+            end
+        end
+        return mockState.originalFunctions._get_my_offer(self)
+    end
+    
+    TradeApp._get_partner_offer = function(self)
+        local state = self:_get_local_trade_state()
+        if mockState.active and state then
+            if Players.LocalPlayer == state.sender then
+                return state.recipient_offer, 'recipient_offer'
+            else
+                return state.sender_offer, 'sender_offer'
+            end
+        end
+        return mockState.originalFunctions._get_partner_offer(self)
+    end
+    
+    TradeApp._get_my_player = function(self)
+        if mockState.active and mockState.trade then
+            return Players.LocalPlayer
+        end
+        return mockState.originalFunctions._get_my_player(self)
+    end
+    
+    TradeApp._get_partner = function(self)
+        if mockState.active and mockState.trade then
+            return mockState.trade.recipient
+        end
+        return mockState.originalFunctions._get_partner(self)
+    end
+    
+    TradeApp._get_current_trade_stage = function(self)
+        if mockState.active and mockState.trade then
+            return mockState.trade.current_stage
+        end
+        return mockState.originalFunctions._get_current_trade_stage(self)
+    end
+    
+    TradeApp._get_lock_time = function(self)
+        if mockState.active and mockState.trade then
+            if self:_get_current_trade_stage() == 'negotiation' then
+                return CONFIG.NEGOTIATION_LOCK
+            else
+                local itemCount = #mockState.trade.sender_offer.items + #mockState.trade.recipient_offer.items
+                return math.clamp(CONFIG.CONFIRMATION_LOCK_PER_ITEM * itemCount, 5, 15)
+            end
+        end
+        return mockState.originalFunctions._get_lock_time(self)
+    end
+    
+    TradeApp._lock_trade_for_appropriate_time = function(self)
+        if mockState.active then
+            if self.lock_countdown then
+                self.lock_countdown:stop()
+                self.lock_countdown:set_duration(self:_get_lock_time())
+                self.lock_countdown:start()
+            end
+        else
+            return mockState.originalFunctions._lock_trade_for_appropriate_time(self)
+        end
+    end
+    
+    TradeApp._add_item_to_my_offer = function(self)
+        if mockState.active and mockState.trade then
+            if mockState.isAddingItem then return end
+            mockState.isAddingItem = true
+            
+            local pickedItem = BackpackApp:pick_item({
+                keep_cached_scroll_positions_on_open = true,
+                allow_callback = function(item) return true end,
+            })
+            
+            if pickedItem then
+                local alreadyInTrade = false
+                for _, item in ipairs(mockState.trade.sender_offer.items) do
+                    if item.unique == pickedItem.unique then
+                        alreadyInTrade = true
+                        break
+                    end
+                end
+                
+                if not alreadyInTrade then
+                    table.insert(mockState.trade.sender_offer.items, pickedItem)
+                    mockState.trade.sender_offer.negotiated = false
+                    mockState.trade.recipient_offer.negotiated = false
+                    
+                    if mockState.trade.current_stage == 'confirmation' then
+                        mockState.trade.current_stage = 'negotiation'
+                        mockState.trade.sender_offer.confirmed = false
+                        mockState.trade.recipient_offer.confirmed = false
+                    end
+                    
+                    mockState.trade.offer_version = mockState.trade.offer_version + 1
+                    self:_overwrite_local_trade_state(mockState.trade)
+                    self:_lock_trade_for_appropriate_time()
+                    
+                    if BackpackApp.set_item_unique_hidden then
+                        BackpackApp:set_item_unique_hidden(pickedItem.unique, 'TradeApp')
+                    end
+                end
+            end
+            
+            mockState.isAddingItem = false
+        else
+            return mockState.originalFunctions._add_item_to_my_offer(self)
+        end
+    end
+    
+    TradeApp._remove_item_from_my_offer = function(self, item)
+        if mockState.active and mockState.trade then
+            for i, v in ipairs(mockState.trade.sender_offer.items) do
+                if v.unique == item.unique then
+                    table.remove(mockState.trade.sender_offer.items, i)
+                    mockState.trade.sender_offer.negotiated = false
+                    mockState.trade.recipient_offer.negotiated = false
+                    
+                    if mockState.trade.current_stage == 'confirmation' then
+                        mockState.trade.current_stage = 'negotiation'
+                        mockState.trade.sender_offer.confirmed = false
+                        mockState.trade.recipient_offer.confirmed = false
+                    end
+                    
+                    mockState.trade.offer_version = mockState.trade.offer_version + 1
+                    self:_overwrite_local_trade_state(mockState.trade)
+                    
+                    if self._lock_trade_for_appropriate_time then
+                        self:_lock_trade_for_appropriate_time()
+                    end
+                    
+                    if BackpackApp.reset_hidden_item_tag then
+                        BackpackApp:reset_hidden_item_tag('TradeApp')
+                    end
+                    break
+                end
+            end
+        else
+            return mockState.originalFunctions._remove_item_from_my_offer(self, item)
+        end
+    end
+    
+    TradeApp._on_accept_pressed = function(self)
+        if mockState.active and mockState.trade then
+            if mockState.trade.sender_offer.negotiated then
+                mockState.trade.sender_offer.negotiated = false
+            else
+                mockState.trade.sender_offer.negotiated = true
+                
+                if mockState.trade.recipient_offer.negotiated then
+                    mockState.trade.current_stage = 'confirmation'
+                    mockState.trade.offer_version = mockState.trade.offer_version + 1
+                    self:_overwrite_local_trade_state(mockState.trade)
+                    
+                    if TradeApp._evaluate_trade_fairness then
+                        TradeApp:_evaluate_trade_fairness()
+                    end
+                    
+                    if TradeApp._lock_trade_for_appropriate_time then
+                        TradeApp:_lock_trade_for_appropriate_time()
+                    end
+                else
+                    mockState.trade.offer_version = mockState.trade.offer_version + 1
+                    self:_overwrite_local_trade_state(mockState.trade)
+                end
+            end
+            
+            if CONFIG.AUTO_PARTNER and not mockState.trade.recipient_offer.negotiated and mockState.trade.sender_offer.negotiated then
+                task.spawn(partnerAutoAction)
+            end
+        else
+            return mockState.originalFunctions._on_accept_pressed(self)
+        end
+    end
+    
+    TradeApp._on_confirm_pressed = function(self)
+        if mockState.active and mockState.trade then
+            mockState.trade.sender_offer.confirmed = true
+            mockState.trade.offer_version = mockState.trade.offer_version + 1
+            self:_overwrite_local_trade_state(mockState.trade)
+            
+            if CONFIG.AUTO_PARTNER and not mockState.trade.recipient_offer.confirmed then
+                task.spawn(partnerAutoAction)
+            end
+        else
+            return mockState.originalFunctions._on_confirm_pressed(self)
+        end
+    end
+    
+    TradeApp._on_unaccept_pressed = function(self)
+        if mockState.active and mockState.trade then
+            mockState.trade.sender_offer.negotiated = false
+            
+            if mockState.trade.current_stage == 'confirmation' then
+                mockState.trade.current_stage = 'negotiation'
+                mockState.trade.recipient_offer.negotiated = false
+                mockState.trade.sender_offer.confirmed = false
+                mockState.trade.recipient_offer.confirmed = false
+            end
+            
+            mockState.trade.offer_version = mockState.trade.offer_version + 1
+            self:_overwrite_local_trade_state(mockState.trade)
+        else
+            return mockState.originalFunctions._on_unaccept_pressed(self)
+        end
+    end
+    
+    TradeApp._decline_trade = function(self, silent)
+        if mockState.active then
+            if self.lock_countdown then
+                self.lock_countdown:stop()
+            end
+            
+            mockState.active = false
+            mockState.trade = nil
+            mockState.isAddingItem = false
+            mockState.partnerActionPending = false
+            mockState.tradeCompleting = false
+            mockState.scamWarningShown = false
+            mockState.canShowTradeRequest = true
+            mockState.tradeRequestBlocked = false
+            
+            self:_overwrite_local_trade_state(nil)
+            UIManager.set_app_visibility('TradeApp', false)
+            
+            if BackpackApp.reset_hidden_item_tag then
+                BackpackApp:reset_hidden_item_tag('TradeApp')
+            end
+        else
+            return mockState.originalFunctions._decline_trade(self, silent)
+        end
+    end
+    
+    TradeApp._evaluate_trade_fairness = function(self)
+        if mockState.active and mockState.trade and not mockState.scamWarningShown then
+            local myItems = #mockState.trade.sender_offer.items
+            local partnerItems = #mockState.trade.recipient_offer.items
+            
+            if myItems > 0 and partnerItems == 0 then
+                mockState.scamWarningShown = true
+                
+                if DialogApp then
+                    DialogApp:dialog({
+                        text = 'This trade seems unbalanced. Be careful!',
+                        button = 'I understand',
+                        yields = false,
+                    })
+                end
+            end
+        elseif mockState.originalFunctions._evaluate_trade_fairness then
+            return mockState.originalFunctions._evaluate_trade_fairness(self)
+        end
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- HOOK TRADE HISTORY
+-- ═══════════════════════════════════════════════════════════════
+local function hookTradeHistoryFunctions()
+    if not TradeHistoryApp then return end
+    
+    if mockState.originalGetTradeHistory then
+        TradeHistoryApp._get_trade_history = function(self, useCache)
+            local history = mockState.originalGetTradeHistory(self, useCache)
+            local combined = {}
+            local seenIds = {}
+            
+            if history then
+                for _, realTrade in ipairs(history) do
+                    if not seenIds[realTrade.trade_id] then
+                        table.insert(combined, realTrade)
+                        seenIds[realTrade.trade_id] = true
+                    end
+                end
+            end
+            
+            for _, mockTrade in ipairs(mockState.tradeHistory) do
+                if not seenIds[mockTrade.trade_id] then
+                    table.insert(combined, mockTrade)
+                    seenIds[mockTrade.trade_id] = true
+                end
+            end
+            
+            self.cached_trade_history = combined
+            return combined
+        end
+    end
+    
+    if mockState.originalReportScam then
+        TradeHistoryApp.report_scam = function(self, tradeData)
+            if tradeData and string.find(tostring(tradeData.trade_id), 'MOCK_') then
+                self.UIManager.set_app_visibility(self.ClassName, false)
+                
+                local dialogResult = self.UIManager.apps.DialogApp:dialog({
+                    dialog_type = 'ReportScamDialog',
+                    suspect_name = CONFIG.PARTNER_NAME,
+                    placeholder_text = 'What happened? (Optional)',
+                    max_length = 500,
+                    left = 'Cancel',
+                    right = 'Report'
+                })
+                
+                if dialogResult == 'Report' then
+                    if HintApp then
+                        HintApp:hint({
+                            text = 'Submitting scam report...',
+                            length = 4,
+                            yields = false,
+                        })
+                    end
+                    
+                    task.wait(2)
+                    
+                    for _, record in ipairs(mockState.tradeHistory) do
+                        if record.trade_id == tradeData.trade_id then
+                            record.reported = true
+                            break
+                        end
+                    end
+                    
+                    self.UIManager.apps.DialogApp:dialog({
+                        text = 'Thanks for your report!',
+                        button = 'Close',
+                        yields = false,
+                    })
+                    
+                    return true
+                end
+                
+                self.UIManager.set_app_visibility(self.ClassName, true)
+                return false
+            end
+            return mockState.originalReportScam(self, tradeData)
+        end
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- HOOK DIALOG APP
+-- ═══════════════════════════════════════════════════════════════
+local function hookDialogApp()
+    if not DialogApp or not DialogApp.dialog then return end
+    
+    mockState.originalDialogFunction = DialogApp.dialog
+    
+    DialogApp.dialog = function(self, options, ...)
+        if options and options.text then
+            if string.find(options.text, 'has expired!') then
+                return 'Okay'
+            end
+            
+            if mockState.active and (options.text:find('sent you a trade request') or options.text:find('wants to trade')) then
+                return 'Decline'
+            end
+        end
+        
+        return mockState.originalDialogFunction(self, options, ...)
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- SHOW TRADE REQUEST
+-- ═══════════════════════════════════════════════════════════════
+local function showTradeRequest()
+    if mockState.pendingTradeRequest or mockState.active or not mockState.canShowTradeRequest or mockState.tradeRequestBlocked then
+        return
+    end
+    
+    mockState.pendingTradeRequest = true
+    mockState.canShowTradeRequest = false
+    
+    task.wait(CONFIG.TRADE_REQUEST_DELAY)
+    
+    if not mockState.pendingTradeRequest then
+        mockState.canShowTradeRequest = true
+        return
+    end
+    
+    local dialogOptions = {
+        text = CONFIG.PARTNER_NAME .. ' sent you a trade request',
+        left = 'Decline',
+        right = 'Accept',
+        yields = true,
+    }
+    
+    if CONFIG.SHOW_VERIFIED_FRIEND then
+        dialogOptions.dialog_type = 'HeaderDialog'
+        dialogOptions.header = 'Verified Friend'
+        dialogOptions.header_icon = 'rbxassetid://84667805159408'
+    end
+    
+    local dialogResult = DialogApp:dialog(dialogOptions)
+    
+    if dialogResult == 'Accept' then
+        mockState.active = false
+        mockState.trade = nil
+        mockState.isAddingItem = false
+        mockState.partnerActionPending = false
+        mockState.tradeCompleting = false
+        mockState.scamWarningShown = true
+        mockState.tradeRequestBlocked = true
+        mockState.blockedTradeRequests = {}
+        
+        mockState.trade = createMockTrade()
+        mockState.active = true
+        
+        UIManager.set_app_visibility('TradeApp', false)
+        task.wait(0.2)
+        
+        TradeApp:_overwrite_local_trade_state(mockState.trade)
+        
+        task.wait(0.3)
+        UIManager.set_app_visibility('TradeApp', true)
+        FriendHighlight(true)
+        
+        if TradeApp._show_intro_message then
+            TradeApp:_show_intro_message()
+        end
+        
+        task.wait(0.2)
+        if TradeApp.refresh_all then
+            TradeApp:refresh_all()
+            FriendHighlight(true)
+        end
+    else
+        mockState.canShowTradeRequest = true
+    end
+    
+    mockState.pendingTradeRequest = false
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- UPDATE PARTNER FROM USERNAME
+-- ═══════════════════════════════════════════════════════════════
+local function updatePartnerFromUsername(username)
+    local success, userId = pcall(function()
+        return Players:GetUserIdFromNameAsync(username)
+    end)
+    
+    if success and userId then
+        CONFIG.PARTNER_USER_ID = userId
+        CONFIG.PARTNER_NAME = username
+        mockPartner = createMockPartner()
+        return true
+    else
+        CONFIG.PARTNER_NAME = username
+        mockPartner = createMockPartner()
+        return false
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- PET SPAWNER FUNCTIONS
+-- ═══════════════════════════════════════════════════════════════
+local function createPet(petName, properties)
+    local petId, kind = GetPetByName(petName)
+    if not petId then
+        return nil, "Pet not found"
+    end
+    
+    local items = load('KindDB')
+    local item = items[kind]
+    if not item then
+        return nil, "Kind not found"
+    end
+    
+    local uniqueId = getUniqueId()
+    
+    local oldId = set_thread_identity(2)
+    local new_pet = {
+        unique = uniqueId,
+        category = 'pets',
+        id = petId,
+        kind = kind,
+        newness_order = math.random(1, 900000),
+        properties = properties or {},
+    }
+    
+    local inventory = ClientData.get('inventory')
+    inventory.pets[uniqueId] = new_pet
+    set_thread_identity(oldId)
+    
+    spawnerState.pets[uniqueId] = {
+        data = new_pet,
+        model = nil,
+    }
+    
+    return new_pet
+end
+
+local function createToy(toyName, properties)
+    local toyId, kind = GetToyByName(toyName)
+    if not toyId then
+        return nil, "Toy not found"
+    end
+    
+    local items = load('KindDB')
+    local item = items[kind]
+    if not item then
+        return nil, "Kind not found"
+    end
+    
+    local uniqueId = getUniqueId()
+    
+    local oldId = set_thread_identity(2)
+    local new_toy = {
+        unique = uniqueId,
+        category = 'toys',
+        id = toyId,
+        kind = kind,
+        newness_order = math.random(1, 900000),
+        properties = properties or {},
+    }
+    
+    local inventory = ClientData.get('inventory')
+    inventory.toys[uniqueId] = new_toy
+    set_thread_identity(oldId)
+    
+    return new_toy
+end
+
+local function addPetWrapper(wrapper)
+    updateData('pet_char_wrappers', function(petWrappers)
+        wrapper.unique = #petWrappers + 1
+        wrapper.index = #petWrappers + 1
+        petWrappers[#petWrappers + 1] = wrapper
+        return petWrappers
+    end)
+end
+
+local function addPetState(state)
+    updateData('pet_state_managers', function(petStates)
+        petStates[#petStates + 1] = state
+        return petStates
+    end)
+end
+
+local function removePetWrapper(uniqueId)
+    updateData('pet_char_wrappers', function(petWrappers)
+        local index = findIndex(petWrappers, function(wrapper)
+            return wrapper.pet_unique == uniqueId
+        end)
+        
+        if not index then return petWrappers end
+        
+        table.remove(petWrappers, index)
+        
+        for wrapperIndex, wrapper in pairs(petWrappers) do
+            wrapper.unique = wrapperIndex
+            wrapper.index = wrapperIndex
+        end
+        
+        return petWrappers
+    end)
+end
+
+local function removePetState(uniqueId)
+    local pet = spawnerState.pets[uniqueId]
+    if not pet or not pet.model then return end
+    
+    updateData('pet_state_managers', function(petStates)
+        local index = findIndex(petStates, function(state)
+            return state.char == pet.model
+        end)
+        
+        if not index then return petStates end
+        
+        table.remove(petStates, index)
+        return petStates
+    end)
+end
+
+local function unequipPet(item)
+    local pet = spawnerState.pets[item.unique]
+    if not pet then return end
+    
+    removePetWrapper(item.unique)
+    removePetState(item.unique)
+    
+    if pet.model then
+        pet.model:Destroy()
+        pet.model = nil
+    end
+    
+    spawnerState.equippedPet = nil
+end
+
+local function equipPet(item)
+    if spawnerState.equippedPet then
+        unequipPet(spawnerState.equippedPet)
+    end
+    
+    local petModel = getPetModel(item.kind)
+    if not petModel then return end
+    
+    petModel.Parent = workspace
+    spawnerState.pets[item.unique].model = petModel
+    
+    local items = load('KindDB')
+    if item.properties.mega_neon then
+        applyMegaNeonEffects(petModel, item.kind)
+    elseif item.properties.neon then
+        applyNeonEffects(petModel, item.kind)
+    end
+    
+    spawnerState.equippedPet = item
+    
+    addPetWrapper({
+        char = petModel,
+        mega_neon = item.properties.mega_neon,
+        neon = item.properties.neon,
+        player = LocalPlayer,
+        entity_controller = LocalPlayer,
+        controller = LocalPlayer,
+        rp_name = item.properties.rp_name or '',
+        pet_trick_level = item.properties.pet_trick_level,
+        pet_unique = item.unique,
+        pet_id = item.id,
+        location = {
+            full_destination_id = 'housing',
+            destination_id = 'housing',
+            house_owner = LocalPlayer,
+        },
+        pet_progression = {
+            age = math.random(1, 900000),
+            percentage = math.random(0.01, 0.99),
+        },
+        are_colors_sealed = false,
+        is_pet = true,
+    })
+    
+    addPetState({
+        char = petModel,
+        player = LocalPlayer,
+        store_key = 'pet_state_managers',
+        is_sitting = false,
+        chars_connected_to_me = {},
+        states = {},
+    })
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- FAKE FRIENDS SYSTEM
+-- ═══════════════════════════════════════════════════════════════
+local function addFakeFriend(username)
+    if not FriendsApp then return false end
+    
+    username = username:gsub("^%s+", ""):gsub("%s+$", "")
+    if username == "" or #username < 3 or #username > 20 then
+        return false
+    end
+    
+    for _, friend in pairs(_G.fakeFriendsData) do
+        if friend.UserName == username then
+            return false
+        end
+    end
+    
+    local userId = 1
+    pcall(function()
+        userId = Players:GetUserIdFromNameAsync(username)
+    end)
+    
+    local fakeData = {
+        UserName = username,
+        VisitorId = userId,
+        PlaceId = 0,
+        IsFake = true
+    }
+    
+    table.insert(_G.fakeFriendsData, fakeData)
+    return true
+end
+
+local function clearAllFakeFriends()
+    _G.fakeFriendsData = {}
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- INITIALIZE HOOKS
+-- ═══════════════════════════════════════════════════════════════
+hookTradeFunctions()
+hookTradeHistoryFunctions()
+hookDialogApp()
+
+-- ═══════════════════════════════════════════════════════════════
+-- GUI CREATION
+-- ═══════════════════════════════════════════════════════════════
+local controlGui = Instance.new('ScreenGui')
+controlGui.Name = 'DC_Plastica1'
+controlGui.ResetOnSpawn = false
+controlGui.DisplayOrder = 10
+controlGui.Enabled = true
+controlGui.Parent = LocalPlayer:WaitForChild('PlayerGui')
+
+-- Main Frame
+local mainFrame = Instance.new('Frame')
+mainFrame.Size = UDim2.new(0, 220, 0, 480)
+mainFrame.Position = UDim2.new(0, 10, 0.5, -240)
+mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+mainFrame.BorderSizePixel = 0
+mainFrame.Parent = controlGui
+
+local mainCorner = Instance.new('UICorner')
+mainCorner.CornerRadius = UDim.new(0, 8)
+mainCorner.Parent = mainFrame
+
+local mainStroke = Instance.new('UIStroke')
+mainStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+mainStroke.Color = Color3.fromRGB(100, 100, 255)
+mainStroke.Thickness = 2
+mainStroke.Parent = mainFrame
+
+-- Animated stroke color
+task.spawn(function()
+    local colors = {
+        Color3.fromRGB(170, 0, 255),
+        Color3.fromRGB(0, 100, 255),
+        Color3.fromRGB(0, 255, 150),
+        Color3.fromRGB(255, 100, 0),
+        Color3.fromRGB(255, 50, 150),
+    }
+    local index = 1
+    while mainStroke and mainStroke.Parent do
+        local nextIndex = index % #colors + 1
+        TweenService:Create(mainStroke, TweenInfo.new(3, Enum.EasingStyle.Linear), {
+            Color = colors[nextIndex]
+        }):Play()
+        index = nextIndex
+        task.wait(3)
+    end
+end)
+
+-- Title
+local titleLabel = Instance.new('TextLabel')
+titleLabel.Size = UDim2.new(1, 0, 0, 30)
+titleLabel.Position = UDim2.new(0, 0, 0, 5)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = '🎮 DC PLASTICA1'
+titleLabel.Font = Enum.Font.FredokaOne
+titleLabel.TextSize = 16
+titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+titleLabel.Parent = mainFrame
+
+local titleStroke = Instance.new('UIStroke')
+titleStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+titleStroke.Color = Color3.new(0, 0, 0)
+titleStroke.Thickness = 1
+titleStroke.Parent = titleLabel
+
+-- Tab Container
+local tabContainer = Instance.new('Frame')
+tabContainer.Size = UDim2.new(0.94, 0, 0, 28)
+tabContainer.Position = UDim2.new(0.03, 0, 0, 38)
+tabContainer.BackgroundTransparency = 1
+tabContainer.Parent = mainFrame
+
+-- Content Container
+local contentContainer = Instance.new('Frame')
+contentContainer.Size = UDim2.new(0.94, 0, 1, -75)
+contentContainer.Position = UDim2.new(0.03, 0, 0, 70)
+contentContainer.BackgroundTransparency = 1
+contentContainer.ClipsDescendants = true
+contentContainer.Parent = mainFrame
+
+-- Tab Frames
+local tabFrames = {}
+local tabButtons = {}
+local currentTab = 'Trade'
+
+local tabs = {'Trade', 'Spawn', 'Friends', 'Config'}
+
+for i, tabName in ipairs(tabs) do
+    -- Tab Button
+    local tabButton = Instance.new('TextButton')
+    tabButton.Size = UDim2.new(1/#tabs - 0.02, 0, 1, 0)
+    tabButton.Position = UDim2.new((i-1) * (1/#tabs), 0, 0, 0)
+    tabButton.BackgroundColor3 = i == 1 and Color3.fromRGB(60, 60, 80) or Color3.fromRGB(40, 40, 55)
+    tabButton.Text = tabName
+    tabButton.Font = Enum.Font.FredokaOne
+    tabButton.TextSize = 10
+    tabButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    tabButton.Parent = tabContainer
+    
+    local tabCorner = Instance.new('UICorner')
+    tabCorner.CornerRadius = UDim.new(0, 4)
+    tabCorner.Parent = tabButton
+    
+    tabButtons[tabName] = tabButton
+    
+    -- Tab Frame
+    local tabFrame = Instance.new('ScrollingFrame')
+    tabFrame.Size = UDim2.new(1, 0, 1, 0)
+    tabFrame.BackgroundTransparency = 1
+    tabFrame.ScrollBarThickness = 4
+    tabFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+    tabFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    tabFrame.Visible = i == 1
+    tabFrame.Parent = contentContainer
+    
+    local layout = Instance.new('UIListLayout')
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Padding = UDim.new(0, 5)
+    layout.Parent = tabFrame
+    
+    local padding = Instance.new('UIPadding')
+    padding.PaddingTop = UDim.new(0, 5)
+    padding.PaddingBottom = UDim.new(0, 5)
+    padding.Parent = tabFrame
+    
+    tabFrames[tabName] = tabFrame
+    
+    tabButton.MouseButton1Click:Connect(function()
+        for name, btn in pairs(tabButtons) do
+            btn.BackgroundColor3 = name == tabName and Color3.fromRGB(60, 60, 80) or Color3.fromRGB(40, 40, 55)
+        end
+        for name, frame in pairs(tabFrames) do
+            frame.Visible = name == tabName
+        end
+        currentTab = tabName
+    end)
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- HELPER: Create UI Elements
+-- ═══════════════════════════════════════════════════════════════
+local function createLabel(parent, text, order)
+    local label = Instance.new('TextLabel')
+    label.Size = UDim2.new(1, 0, 0, 16)
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.Font = Enum.Font.SourceSansSemibold
+    label.TextSize = 11
+    label.TextColor3 = Color3.fromRGB(180, 180, 180)
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.LayoutOrder = order or 0
+    label.Parent = parent
+    return label
+end
+
+local function createTextBox(parent, placeholder, order)
+    local box = Instance.new('TextBox')
+    box.Size = UDim2.new(1, 0, 0, 28)
+    box.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
+    box.Text = ''
+    box.PlaceholderText = placeholder
+    box.Font = Enum.Font.SourceSans
+    box.TextSize = 12
+    box.TextColor3 = Color3.fromRGB(255, 255, 255)
+    box.ClearTextOnFocus = false
+    box.LayoutOrder = order or 0
+    box.Parent = parent
+    
+    local corner = Instance.new('UICorner')
+    corner.CornerRadius = UDim.new(0, 4)
+    corner.Parent = box
+    
+    local stroke = Instance.new('UIStroke')
+    stroke.Color = Color3.fromRGB(80, 80, 100)
+    stroke.Thickness = 1
+    stroke.Parent = box
+    
+    return box
+end
+
+local function createButton(parent, text, color, order)
+    local button = Instance.new('TextButton')
+    button.Size = UDim2.new(1, 0, 0, 28)
+    button.BackgroundColor3 = color or Color3.fromRGB(60, 100, 200)
+    button.Text = text
+    button.Font = Enum.Font.FredokaOne
+    button.TextSize = 12
+    button.TextColor3 = Color3.fromRGB(255, 255, 255)
+    button.LayoutOrder = order or 0
+    button.Parent = parent
+    
+    local corner = Instance.new('UICorner')
+    corner.CornerRadius = UDim.new(0, 4)
+    corner.Parent = button
+    
+    return button
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- TRADE TAB
+-- ═══════════════════════════════════════════════════════════════
+local tradeFrame = tabFrames['Trade']
+
+createLabel(tradeFrame, '👤 Partner Username', 1)
+local partnerBox = createTextBox(tradeFrame, 'Enter username...', 2)
+partnerBox.Text = CONFIG.PARTNER_NAME
+
+local updatePartnerBtn = createButton(tradeFrame, '✓ Set Partner', Color3.fromRGB(60, 150, 60), 3)
+updatePartnerBtn.MouseButton1Click:Connect(function()
+    if partnerBox.Text ~= '' then
+        updatePartnerFromUsername(partnerBox.Text)
+        if HintApp then
+            HintApp:hint({text = 'Partner set to: ' .. CONFIG.PARTNER_NAME, length = 2})
+        end
+    end
+end)
+
+createLabel(tradeFrame, '📨 Trade Actions', 4)
+
+local sendRequestBtn = createButton(tradeFrame, '📤 Send Trade Request', Color3.fromRGB(100, 60, 200), 5)
+sendRequestBtn.MouseButton1Click:Connect(function()
+    showTradeRequest()
+end)
+
+createLabel(tradeFrame, '🐾 Add Pet to Partner', 6)
+local petNameBox = createTextBox(tradeFrame, 'Pet name...', 7)
+
+-- Flags container
+local flagsFrame = Instance.new('Frame')
+flagsFrame.Size = UDim2.new(1, 0, 0, 28)
+flagsFrame.BackgroundTransparency = 1
+flagsFrame.LayoutOrder = 8
+flagsFrame.Parent = tradeFrame
+
+local flagColors = {
+    F = Color3.fromRGB(0, 200, 255),
+    R = Color3.fromRGB(255, 50, 150),
+    N = Color3.fromRGB(0, 255, 100),
+    M = Color3.fromRGB(170, 0, 255),
+}
+
+for i, flag in ipairs({'F', 'R', 'N', 'M'}) do
+    local flagBtn = Instance.new('TextButton')
+    flagBtn.Size = UDim2.new
